@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from codex_memory.config import Config
+from codex_memory.model_client import CodexMiniClient
+from codex_memory.review import MemoryReviewer
+from codex_memory.schema import Evidence, MemoryCandidate
+
+
+CASES = [
+    (
+        "stable_preference",
+        "active",
+        {
+            "content": "用户默认希望使用中文回答。",
+            "memory_type": "user_preference",
+            "confidence": 0.94,
+            "importance": 0.8,
+            "ttl": "long",
+            "scope": "global",
+            "evidence": [Evidence(source="user_message", quote="请记住，我默认希望你用中文回答。")],
+        },
+    ),
+    (
+        "temporary_debug",
+        "quarantined",
+        {
+            "content": "用户这次临时希望打开 debug 日志。",
+            "memory_type": "user_preference",
+            "confidence": 0.95,
+            "importance": 0.7,
+            "ttl": "long",
+            "scope": "global",
+            "evidence": [Evidence(source="user_message", quote="这次临时打开 debug 日志。")],
+        },
+    ),
+    (
+        "plain_noise",
+        "rejected",
+        {
+            "content": "这是一条测试消息",
+            "memory_type": "fact",
+            "confidence": 0.99,
+            "importance": 0.9,
+            "ttl": "long",
+            "scope": "global",
+            "evidence": [Evidence(source="user_message", quote="这是一条测试消息")],
+        },
+    ),
+    (
+        "secret",
+        "rejected",
+        {
+            "content": "api_key = sk-thisShouldNeverBeStored1234567890",
+            "memory_type": "fact",
+            "confidence": 0.99,
+            "importance": 0.99,
+            "ttl": "long",
+            "scope": "global",
+            "evidence": [Evidence(source="tool", quote="api_key = sk-thisShouldNeverBeStored1234567890")],
+        },
+    ),
+    (
+        "project_decision",
+        "active",
+        {
+            "content": "项目架构决策：MCP 和 hook 必须是两条不重叠的路，不能互相调用。",
+            "memory_type": "project_context",
+            "confidence": 0.95,
+            "importance": 0.86,
+            "ttl": "long",
+            "scope": "project",
+            "evidence": [Evidence(source="user_message", quote="MCP 与 hook 应该是两条不重叠的路，不能混。")],
+        },
+    ),
+    (
+        "context_inference",
+        "quarantined",
+        {
+            "content": "用户认为 MCP 与 hook 必须分离。",
+            "memory_type": "project_context",
+            "confidence": 0.96,
+            "importance": 0.85,
+            "ttl": "long",
+            "scope": "project",
+            "evidence": [Evidence(source="memory_context", quote="Codex Memory context: MCP 与 hook 分离")],
+        },
+    ),
+    (
+        "task_state",
+        "quarantined",
+        {
+            "content": "当前正在跑 50 轮测试。",
+            "memory_type": "task_state",
+            "confidence": 0.95,
+            "importance": 0.7,
+            "ttl": "session",
+            "scope": "session",
+            "evidence": [Evidence(source="user_message", quote="当前正在跑 50 轮测试。")],
+        },
+    ),
+    (
+        "experience",
+        "active",
+        {
+            "content": "经验：如果 hook 内部调用 codex exec，必须设置 internal 标记，否则会递归触发。",
+            "memory_type": "experience",
+            "confidence": 0.95,
+            "importance": 0.86,
+            "ttl": "long",
+            "scope": "project",
+            "evidence": [Evidence(source="user_message", quote="如果 hook 内部调用 codex exec，必须设置 internal 标记，否则会递归触发。")],
+        },
+    ),
+]
+
+
+def main() -> int:
+    os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
+    with tempfile.TemporaryDirectory() as tmp:
+        config = Config(
+            model="gpt-5.4-mini",
+            state_dir=Path(tmp),
+            ledger_path=Path(tmp) / "ledger.sqlite3",
+            palace_path=None,
+            min_active_confidence=0.82,
+            min_quarantine_confidence=0.62,
+            duplicate_threshold=0.9,
+            max_evidence_quote_chars=500,
+        )
+        reviewer = MemoryReviewer(config, CodexMiniClient(config))
+        rows = []
+        for name, expected, data in CASES:
+            candidate = MemoryCandidate(proposed_action="store", reason="evaluation case", **data)
+            review = reviewer.review(candidate)
+            rows.append({"name": name, "expected": expected, "actual": review["status"], "passed": review["status"] == expected, "reasons": review.get("reasons", [])})
+    active_predictions = [row for row in rows if row["actual"] == "active"]
+    false_active = [row for row in active_predictions if row["expected"] != "active"]
+    report = {
+        "total": len(rows),
+        "passed": sum(1 for row in rows if row["passed"]),
+        "failed": [row for row in rows if not row["passed"]],
+        "active_precision": 1.0 if not active_predictions else round(1 - len(false_active) / len(active_predictions), 4),
+        "false_active": false_active,
+        "rows": rows,
+    }
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if not report["failed"] and not false_active else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

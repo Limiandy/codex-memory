@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+import time
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from codex_memory.config import Config
+from codex_memory.ledger import project_key_for_cwd
+from codex_memory.schema import Evidence, MemoryCandidate
+from codex_memory.service import MemoryService
+
+
+REPORT_PATH = Path("/private/tmp/codex-memory-policy-stress-report.json")
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    prompt: str
+    candidate: MemoryCandidate | None
+    assistant_mode: str
+    cwd: str
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run broad closed-loop Codex Memory governance policy stress test.")
+    parser.add_argument("--rounds", type=int, default=200)
+    parser.add_argument("--govern-every", type=int, default=25)
+    parser.add_argument("--state-dir", default="")
+    args = parser.parse_args()
+
+    os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
+    os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
+
+    state_dir = Path(args.state_dir) if args.state_dir else Path(tempfile.mkdtemp(prefix="codex-memory-policy-stress-", dir="/private/tmp"))
+    service = _service(state_dir)
+    start = time.time()
+    rounds = []
+    snapshots = []
+    try:
+        scenarios = _scenarios()
+        for index in range(args.rounds):
+            scenario = scenarios[index % len(scenarios)]
+            turn_id = f"stress-turn-{index + 1:04d}"
+            context = service.prompt_context(
+                scenario.prompt,
+                limit=6,
+                cwd=scenario.cwd,
+                session_id="policy-stress",
+                turn_id=turn_id,
+            )
+            outcome = service.apply_recall_outcome(
+                "policy-stress",
+                turn_id,
+                _assistant_message(scenario, context),
+            )
+            admission = _admit_candidate(service, scenario.candidate, cwd=scenario.cwd, session_id="policy-stress")
+            if (index + 1) % args.govern_every == 0:
+                before = _metrics(service)
+                governed = service.govern_memories(apply=True)
+                after = _metrics(service)
+                snapshots.append({"round": index + 1, "before": before, "governed": governed, "after": after})
+            rounds.append(
+                {
+                    "round": index + 1,
+                    "scenario": scenario.name,
+                    "context_injected": bool(context),
+                    "outcome": outcome,
+                    "admission": admission,
+                    "metrics": _compact_metrics(service),
+                }
+            )
+            print(f"{index + 1:03d}/{args.rounds} {scenario.name} injected={bool(context)} admission={admission.get('status')}", flush=True)
+
+        final_governance = service.govern_memories(apply=False)
+        report = {
+            "passed": _passed(service, final_governance),
+            "duration_seconds": round(time.time() - start, 2),
+            "rounds": args.rounds,
+            "govern_every": args.govern_every,
+            "state_dir": str(state_dir),
+            "final_metrics": _metrics(service),
+            "final_governance": final_governance,
+            "snapshots": snapshots,
+            "policy_effects": _policy_effects(service),
+            "active_memories": service.list_memories(status="active", limit=200),
+            "round_samples": rounds[:5] + rounds[-5:],
+        }
+        REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"REPORT {REPORT_PATH}")
+        print(json.dumps(_summary(report), ensure_ascii=False, indent=2))
+        return 0 if report["passed"] else 1
+    finally:
+        service.close()
+
+
+def _service(state_dir: Path) -> MemoryService:
+    config = Config(
+        model="gpt-5.4-mini",
+        state_dir=state_dir,
+        ledger_path=state_dir / "ledger.sqlite3",
+        palace_path=None,
+        min_active_confidence=0.82,
+        min_quarantine_confidence=0.62,
+        duplicate_threshold=0.9,
+        max_evidence_quote_chars=500,
+    )
+    return MemoryService(config)
+
+
+def _admit_candidate(service: MemoryService, candidate: MemoryCandidate | None, cwd: str, session_id: str) -> dict[str, Any]:
+    if candidate is None:
+        return {"status": "none"}
+    project_key = project_key_for_cwd(cwd)
+    local_duplicates = service.ledger.find_active_duplicates(
+        candidate.content,
+        candidate.memory_type,
+        candidate.scope,
+        project_key=project_key,
+        session_id=session_id,
+    )
+    if local_duplicates:
+        review = {
+            "status": "superseded",
+            "reasons": ["merged_exact_duplicate"],
+            "duplicates": [{"id": item["id"], "content": item["content"]} for item in local_duplicates[:3]],
+        }
+        memory_id = service.ledger.add_candidate(candidate, "superseded", review, project_key=project_key, session_id=session_id)
+        service.ledger.add_review_feedback(str(local_duplicates[0]["id"]), "merge_duplicate", f"merged {memory_id}")
+        return {"id": memory_id, "status": "superseded", "reason": "duplicate"}
+
+    conflicts = service.ledger.find_active_conflicts(
+        candidate.content,
+        candidate.memory_type,
+        candidate.scope,
+        project_key=project_key,
+        session_id=session_id,
+    )
+    review = service.reviewer.review(candidate, [])
+    policy_decision = service.ledger.candidate_policy_decision(candidate)
+    if policy_decision:
+        review = {
+            **review,
+            "status": {"quarantine": "quarantined", "reject": "rejected", "supersede": "superseded"}.get(
+                str(policy_decision["action"]), "rejected"
+            ),
+            "reasons": [*review.get("reasons", []), "governance_policy_matched"],
+            "governance_policy": policy_decision,
+        }
+    if conflicts and review["status"] == "active":
+        review = {
+            **review,
+            "status": "quarantined",
+            "reasons": [*review.get("reasons", []), "possible_conflict_with_active_memory"],
+            "conflicts": [{"id": item["id"], "content": item["content"]} for item in conflicts[:3]],
+        }
+    memory_id = service.ledger.add_candidate(candidate, str(review["status"]), review, project_key=project_key, session_id=session_id)
+    if review["status"] == "active":
+        service.ledger.link_related_active_memories(memory_id)
+        service.consolidate_memories()
+    return {"id": memory_id, "status": review["status"], "reasons": review.get("reasons", [])}
+
+
+def _candidate(
+    content: str,
+    memory_type: str,
+    scope: str,
+    domain: str,
+    category: str,
+    subcategory: str,
+    triggers: list[str],
+    confidence: float = 0.95,
+    importance: float = 0.85,
+    ttl: str = "long",
+    evidence_source: str = "user_message",
+) -> MemoryCandidate:
+    return MemoryCandidate(
+        content=content,
+        memory_type=memory_type,
+        proposed_action="store",
+        confidence=confidence,
+        importance=importance,
+        ttl=ttl,
+        scope=scope,
+        domain=domain,
+        category=category,
+        subcategory=subcategory,
+        abstraction_level="principle" if any(term in content for term in ("必须", "不要", "原则", "默认")) else "pattern",
+        triggers=triggers,
+        evidence=[Evidence(source=evidence_source, quote=content)],
+        reason="policy stress scenario",
+    )
+
+
+def _scenarios() -> list[Scenario]:
+    codex = "/tmp/projects/codex-memory"
+    vue = "/tmp/projects/vue-admin"
+    react = "/tmp/projects/react-portal"
+    jquery = "/tmp/projects/jquery-legacy"
+    life = "/tmp/life/home"
+    water = "/tmp/projects/water-engineering"
+    return [
+        Scenario("noise", "这是一条普通测试消息。", None, "neutral", codex),
+        Scenario("secret", "临时测试 api_key = sk-testShouldNeverBeStored1234567890", _candidate("api_key = sk-testShouldNeverBeStored1234567890", "fact", "session", "general", "fact", "secret", ["api_key"], 0.96, 0.9, "session"), "neutral", codex),
+        Scenario("temporary_debug", "这次只需要临时打开 debug 日志。", _candidate("这次只需要临时打开 debug 日志，之后关闭。", "temporary", "session", "memory_system", "workflow", "logging", ["debug", "日志"], 0.9, 0.5, "session"), "neutral", codex),
+        Scenario("preference_language", "请记住，默认用中文回答，并且尽量简洁。", _candidate("用户默认希望用中文回答，并且尽量简洁。", "user_preference", "global", "user_profile", "preference", "language", ["中文", "简洁"]), "use_recalled", codex),
+        Scenario("preference_no_emoji", "记住，不要主动使用 emoji。", _candidate("用户偏好：不要主动使用 emoji。", "user_preference", "global", "user_profile", "preference", "style", ["emoji", "不要"]), "use_recalled", codex),
+        Scenario("project_boundary", "项目架构决策：MCP 与 hook 必须是两条不重叠路径。", _candidate("项目架构决策：MCP 和 hook 必须是两条不重叠的路径，不能互相调用。", "project_context", "project", "memory_system", "architecture", "mcp_hook", ["MCP", "hook", "不重叠"]), "use_recalled", codex),
+        Scenario("project_boundary_duplicate", "MCP 和 hook 还是要保持分离。", _candidate("项目架构上，MCP 与 hook 需要保持两条不重叠路径，不能互相调用。", "project_context", "project", "memory_system", "architecture", "mcp_hook", ["MCP", "hook", "不重叠"]), "use_recalled", codex),
+        Scenario("project_boundary_conflict", "项目架构变更：MCP 和 hook 应该互相调用。", _candidate("项目架构变更：MCP 和 hook 应该互相调用，形成统一链路。", "project_context", "project", "memory_system", "architecture", "mcp_hook", ["MCP", "hook", "互相调用"]), "neutral", codex),
+        Scenario("hook_recursion", "经验：hook 内调用 codex exec 必须设置 internal 标记。", _candidate("经验：如果 hook 内部调用 codex exec，必须设置 internal 标记，否则会递归触发。", "experience", "project", "software_engineering", "lesson", "hook", ["hook", "codex exec", "internal"]), "use_recalled", codex),
+        Scenario("bad_overbroad_testing", "经验：所有测试建议都要长期注入每次回答。", _candidate("经验：所有项目都必须长期注入这条宽泛测试建议。", "experience", "global", "software_engineering", "lesson", "testing", ["测试", "注入", "质量"]), "ignore_recalled", codex),
+        Scenario("vue_frontend", "Vue 管理平台经验：表单权限和接口封装要分层。", _candidate("Vue 管理平台经验：表单权限、路由守卫和接口封装要分层，避免页面组件直接散落业务请求。", "experience", "project", "software_engineering", "lesson", "frontend", ["Vue", "管理平台", "接口封装"]), "use_recalled", vue),
+        Scenario("react_frontend", "React 门户经验：状态边界和缓存策略要明确。", _candidate("React 门户经验：状态边界、接口缓存和首屏加载预算要明确，避免全局状态承载临时页面细节。", "experience", "project", "software_engineering", "lesson", "frontend", ["React", "门户", "状态边界"]), "use_recalled", react),
+        Scenario("jquery_frontend", "jQuery 老项目迁移经验：先隔离 DOM 操作。", _candidate("jQuery 老项目迁移经验：先隔离 DOM 操作和接口调用，再逐步抽出可替换模块。", "experience", "project", "software_engineering", "lesson", "frontend", ["jQuery", "迁移", "DOM"]), "use_recalled", jquery),
+        Scenario("life_lighting", "生活经验：电灯不亮先检查灯泡、开关和空开。", _candidate("生活经验：电灯不亮时先检查灯泡、开关、插座和空开，再判断是否需要找电工。", "experience", "global", "life", "troubleshooting", "lighting", ["电灯", "灯泡", "开关"]), "use_recalled", life),
+        Scenario("water_gate", "水利工程经验：闸门异常要先核对水位和传感器。", _candidate("水利工程经验：闸门调度异常时先核对上下游水位、传感器读数和执行机构状态。", "experience", "project", "water_engineering", "troubleshooting", "water", ["水利", "闸门", "水位"]), "use_recalled", water),
+        Scenario("weak_inference", "我感觉可能应该记住这件事。", _candidate("用户可能喜欢更长的解释。", "user_preference", "global", "user_profile", "preference", "style", ["解释"], 0.82, 0.6, "long", "assistant"), "neutral", codex),
+        Scenario("task_resume", "下一步继续跑治理闭环测试。", _candidate("下一步继续跑治理闭环测试，并检查动态 policy 命中。", "task_state", "session", "memory_system", "workflow", "testing", ["治理", "policy", "测试"], 0.9, 0.65, "session"), "neutral", codex),
+        Scenario("fact_model", "事实：codex-memory 使用 GPT-5.4-Mini 做 memory-engine。", _candidate("codex-memory 使用 GPT-5.4-Mini 作为 memory-engine 和 memory-review 模型。", "fact", "project", "memory_system", "fact", "model", ["GPT-5.4-Mini", "memory-engine"], 0.96, 0.8), "use_recalled", codex),
+        Scenario("logging_pretty", "经验：JSONL 日志要提供 pretty 视图。", _candidate("经验：面向人类排查的 JSONL 日志必须提供 pretty 视图，否则实时观察链路很困难。", "experience", "project", "memory_system", "lesson", "logging", ["日志", "JSONL", "pretty"]), "use_recalled", codex),
+        Scenario("bad_generic_process", "经验：所有项目都应该把流程提示每次注入。", _candidate("经验：所有项目都应该每次注入完整流程提醒。", "experience", "global", "general", "workflow", "general", ["流程", "注入"]), "ignore_recalled", codex),
+    ]
+
+
+def _assistant_message(scenario: Scenario, context: str) -> str:
+    if scenario.assistant_mode == "use_recalled" and context:
+        return f"我会采用相关记忆继续处理：{context[:500]}"
+    if scenario.assistant_mode == "ignore_recalled":
+        return "这次直接给出当前问题的答案，不采用历史提示。"
+    return "收到。"
+
+
+def _metrics(service: MemoryService) -> dict[str, Any]:
+    memories = service.list_memories(limit=200)
+    policies = service.ledger.list_governance_policies(active=True)
+    recalls = service.ledger.list_recall_events(limit=5000)
+    status = Counter(memory["status"] for memory in memories)
+    false_active = [_false_active_reason(memory) for memory in memories if memory.get("status") == "active" and _false_active_reason(memory)]
+    return {
+        "status": dict(sorted(status.items())),
+        "active_count": status.get("active", 0),
+        "false_active_count": len(false_active),
+        "false_active": false_active[:10],
+        "policy_count": len(policies),
+        "policy_hits": sum(int(policy.get("hit_count") or 0) for policy in policies),
+        "policies": [
+            {
+                "id": policy["id"],
+                "type": policy["policy_type"],
+                "action": policy["action"],
+                "source_memory_id": policy.get("source_memory_id"),
+                "hit_count": policy.get("hit_count"),
+                "matcher": policy.get("matcher_json"),
+            }
+            for policy in policies
+        ],
+        "recall_event_count": len(recalls),
+        "total_injected": sum(len(event.get("memory_ids_json") or []) for event in recalls),
+    }
+
+
+def _compact_metrics(service: MemoryService) -> dict[str, Any]:
+    metrics = _metrics(service)
+    return {
+        "active_count": metrics["active_count"],
+        "false_active_count": metrics["false_active_count"],
+        "policy_count": metrics["policy_count"],
+        "policy_hits": metrics["policy_hits"],
+    }
+
+
+def _policy_effects(service: MemoryService) -> list[dict[str, Any]]:
+    recalls = service.ledger.list_recall_events(limit=5000)
+    policies = service.ledger.list_governance_policies(active=True)
+    effects = []
+    for policy in policies:
+        source_id = str(policy.get("source_memory_id") or "")
+        before = 0
+        after = 0
+        created_at = str(policy.get("created_at") or "")
+        for event in recalls:
+            ids = [str(item) for item in event.get("memory_ids_json") or []]
+            if not source_id or source_id not in ids:
+                continue
+            if str(event.get("created_at") or "") <= created_at:
+                before += 1
+            else:
+                after += 1
+        effects.append(
+            {
+                "policy_id": policy["id"],
+                "policy_type": policy["policy_type"],
+                "action": policy["action"],
+                "source_memory_id": source_id,
+                "hit_count": policy.get("hit_count"),
+                "source_recalled_before_policy": before,
+                "source_recalled_after_policy": after,
+            }
+        )
+    return effects
+
+
+def _false_active_reason(memory: dict[str, Any]) -> dict[str, Any] | None:
+    content = str(memory.get("content") or "").lower()
+    reasons = []
+    if "sk-" in content or "api_key" in content:
+        reasons.append("secret")
+    if memory.get("memory_type") in {"temporary", "task_state"}:
+        reasons.append("temporary_or_task_state")
+    if "这是一条普通测试消息" in content:
+        reasons.append("noise")
+    if reasons:
+        return {"id": memory.get("id"), "content": memory.get("content"), "reasons": reasons}
+    return None
+
+
+def _passed(service: MemoryService, governance: dict[str, Any]) -> bool:
+    metrics = _metrics(service)
+    effects = _policy_effects(service)
+    return (
+        metrics["false_active_count"] == 0
+        and metrics["policy_count"] >= 1
+        and metrics["policy_hits"] >= 1
+        and any(effect["source_recalled_before_policy"] > 0 and effect["source_recalled_after_policy"] == 0 for effect in effects)
+        and governance.get("report", {}).get("injection_pressure") in {"low", "medium"}
+    )
+
+
+def _summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "passed": report["passed"],
+        "duration_seconds": report["duration_seconds"],
+        "rounds": report["rounds"],
+        "final_metrics": {
+            key: report["final_metrics"][key]
+            for key in ("status", "active_count", "false_active_count", "policy_count", "policy_hits", "recall_event_count", "total_injected")
+        },
+        "final_governance_issue_count": report["final_governance"].get("report", {}).get("issue_count"),
+        "policy_effects": report["policy_effects"],
+    }
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

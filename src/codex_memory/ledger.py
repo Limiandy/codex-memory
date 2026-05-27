@@ -1,0 +1,1041 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from .schema import MemoryCandidate
+from .taxonomy import enrich_candidate, near_duplicate_text
+
+
+class Ledger:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(path), timeout=60)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=60000")
+        self._init_with_retry()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def _init_with_retry(self) -> None:
+        for attempt in range(5):
+            try:
+                self._init()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 4:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+
+    def _init(self) -> None:
+        self.conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                content TEXT NOT NULL,
+                memory_type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                ttl TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                importance REAL NOT NULL,
+                wing TEXT,
+                room TEXT,
+                domain TEXT,
+                category TEXT,
+                subcategory TEXT,
+                abstraction_level TEXT,
+                triggers_json TEXT NOT NULL DEFAULT '[]',
+                project_key TEXT,
+                source_session_id TEXT,
+                recall_count INTEGER NOT NULL DEFAULT 0,
+                positive_recall_count INTEGER NOT NULL DEFAULT 0,
+                negative_recall_count INTEGER NOT NULL DEFAULT 0,
+                last_recalled_at TEXT,
+                strength REAL NOT NULL DEFAULT 1.0,
+                evidence_json TEXT NOT NULL,
+                reason TEXT,
+                review_json TEXT NOT NULL DEFAULT '{}',
+                mempalace_drawer_id TEXT,
+                kg_triple_ids_json TEXT NOT NULL DEFAULT '[]',
+                supersedes_id TEXT,
+                expires_at TEXT,
+                review_feedback_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+            CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
+            CREATE INDEX IF NOT EXISTS idx_memories_content ON memories(content);
+            CREATE INDEX IF NOT EXISTS idx_memories_scope_project ON memories(status, scope, project_key);
+
+            CREATE TABLE IF NOT EXISTS recall_events (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                route_json TEXT NOT NULL,
+                memory_ids_json TEXT NOT NULL,
+                cwd TEXT,
+                project_key TEXT,
+                session_id TEXT,
+                turn_id TEXT,
+                outcome_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_recall_events_turn ON recall_events(session_id, turn_id);
+
+            CREATE TABLE IF NOT EXISTS memory_edges (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                weight REAL NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source_id, target_id, relation)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_edges_source ON memory_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_edges_target ON memory_edges(target_id);
+
+            CREATE TABLE IF NOT EXISTS governance_reports (
+                id TEXT PRIMARY KEY,
+                report_json TEXT NOT NULL,
+                actions_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS governance_policies (
+                id TEXT PRIMARY KEY,
+                policy_type TEXT NOT NULL,
+                matcher_json TEXT NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                source_memory_id TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                last_hit_at TEXT,
+                expires_at TEXT,
+                supersedes_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_governance_policies_type ON governance_policies(policy_type, active);
+
+            CREATE TABLE IF NOT EXISTS governance_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS events (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                processed_at TEXT,
+                process_error TEXT
+            );
+            """
+        )
+        self._ensure_event_columns()
+        self._ensure_memory_columns()
+        self.conn.commit()
+
+    def _ensure_memory_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
+        if "supersedes_id" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN supersedes_id TEXT")
+        if "expires_at" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN expires_at TEXT")
+        if "review_feedback_json" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN review_feedback_json TEXT NOT NULL DEFAULT '[]'")
+        if "domain" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN domain TEXT")
+        if "category" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN category TEXT")
+        if "subcategory" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN subcategory TEXT")
+        if "abstraction_level" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN abstraction_level TEXT")
+        if "triggers_json" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN triggers_json TEXT NOT NULL DEFAULT '[]'")
+        if "project_key" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN project_key TEXT")
+        if "source_session_id" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN source_session_id TEXT")
+        if "recall_count" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN recall_count INTEGER NOT NULL DEFAULT 0")
+        if "positive_recall_count" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN positive_recall_count INTEGER NOT NULL DEFAULT 0")
+        if "negative_recall_count" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN negative_recall_count INTEGER NOT NULL DEFAULT 0")
+        if "last_recalled_at" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN last_recalled_at TEXT")
+        if "strength" not in columns:
+            self.conn.execute("ALTER TABLE memories ADD COLUMN strength REAL NOT NULL DEFAULT 1.0")
+        self._ensure_governance_policy_columns()
+
+    def _ensure_governance_policy_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(governance_policies)").fetchall()}
+        if not columns:
+            return
+        if "hit_count" not in columns:
+            self.conn.execute("ALTER TABLE governance_policies ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0")
+        if "last_hit_at" not in columns:
+            self.conn.execute("ALTER TABLE governance_policies ADD COLUMN last_hit_at TEXT")
+        if "expires_at" not in columns:
+            self.conn.execute("ALTER TABLE governance_policies ADD COLUMN expires_at TEXT")
+        if "supersedes_id" not in columns:
+            self.conn.execute("ALTER TABLE governance_policies ADD COLUMN supersedes_id TEXT")
+
+    def _ensure_event_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        added_processing_columns = False
+        if "processed_at" not in columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN processed_at TEXT")
+            added_processing_columns = True
+        if "process_error" not in columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN process_error TEXT")
+            added_processing_columns = True
+        if added_processing_columns:
+            self.conn.execute("UPDATE events SET processed_at=created_at WHERE processed_at IS NULL")
+
+    def add_event(self, event_type: str, payload: dict[str, Any]) -> str:
+        event_id = _id("evt")
+        self.conn.execute(
+            "INSERT INTO events(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",
+            (event_id, event_type, json.dumps(payload, ensure_ascii=False), _now()),
+        )
+        self.conn.commit()
+        return event_id
+
+    def get_event(self, event_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        try:
+            data["payload_json"] = json.loads(data["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            data["payload_json"] = {}
+        return data
+
+    def mark_event_processed(self, event_id: str) -> None:
+        self.conn.execute(
+            "UPDATE events SET processed_at=?, process_error=NULL WHERE id=?",
+            (_now(), event_id),
+        )
+        self.conn.commit()
+
+    def mark_event_failed(self, event_id: str, error: str) -> None:
+        self.conn.execute(
+            "UPDATE events SET process_error=? WHERE id=?",
+            (error[:1000], event_id),
+        )
+        self.conn.commit()
+
+    def add_candidate(
+        self,
+        candidate: MemoryCandidate,
+        status: str,
+        review: dict[str, Any],
+        project_key: str | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        candidate = enrich_candidate(candidate)
+        memory_id = _id("mem")
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO memories(
+                id,status,content,memory_type,scope,ttl,confidence,importance,wing,room,
+                domain,category,subcategory,abstraction_level,triggers_json,
+                project_key,source_session_id,
+                evidence_json,reason,review_json,expires_at,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                memory_id,
+                status,
+                candidate.content,
+                candidate.memory_type,
+                candidate.scope,
+                candidate.ttl,
+                candidate.confidence,
+                candidate.importance,
+                candidate.wing,
+                candidate.room,
+                candidate.domain,
+                candidate.category,
+                candidate.subcategory,
+                candidate.abstraction_level,
+                json.dumps(candidate.triggers, ensure_ascii=False),
+                project_key if candidate.scope == "project" else None,
+                session_id if candidate.scope == "session" else None,
+                json.dumps([e.__dict__ for e in candidate.evidence], ensure_ascii=False),
+                candidate.reason,
+                json.dumps(review, ensure_ascii=False),
+                _expiry_for_ttl(candidate.ttl),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return memory_id
+
+    def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def find_active_duplicates(
+        self,
+        content: str,
+        memory_type: str,
+        scope: str,
+        project_key: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized = _normalize(content)
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM memories
+            WHERE status='active' AND memory_type=? AND scope=? AND {_scope_filter(scope)}
+            ORDER BY created_at DESC
+            """,
+            (memory_type, scope, *_scope_params(scope, project_key, session_id)),
+        ).fetchall()
+        matches = []
+        for row in rows:
+            item = _row_to_dict(row)
+            existing_content = str(item.get("content") or "")
+            if _normalize(existing_content) == normalized or (
+                _polarity(existing_content) == _polarity(content)
+                and near_duplicate_text(existing_content, content)
+            ):
+                matches.append(item)
+        return matches
+
+    def find_active_conflicts(
+        self,
+        content: str,
+        memory_type: str,
+        scope: str,
+        project_key: str | None = None,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if memory_type not in {"user_preference", "project_context", "fact"}:
+            return []
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM memories
+            WHERE status='active' AND memory_type=? AND scope=? AND {_scope_filter(scope)}
+            ORDER BY created_at DESC LIMIT 50
+            """,
+            (memory_type, scope, *_scope_params(scope, project_key, session_id)),
+        ).fetchall()
+        content_tokens = _tokens(content)
+        polarity = _polarity(content)
+        if polarity == 0:
+            return []
+        conflicts = []
+        for row in rows:
+            item = _row_to_dict(row)
+            old_content = str(item.get("content") or "")
+            if _polarity(old_content) == -polarity and len(content_tokens & _tokens(old_content)) >= 2:
+                conflicts.append(item)
+        return conflicts
+
+    def supersede(self, old_id: str, new_id: str, reason: str) -> None:
+        old = self.get_memory(old_id)
+        review = dict(old.get("review_json") or {}) if old else {}
+        review["superseded_by"] = new_id
+        review["supersede_reason"] = reason
+        self.set_status(old_id, "superseded", review)
+        self.conn.execute(
+            "UPDATE memories SET supersedes_id=?, updated_at=? WHERE id=?",
+            (old_id, _now(), new_id),
+        )
+        self.conn.commit()
+
+    def add_review_feedback(self, memory_id: str, action: str, note: str = "") -> dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory is None:
+            raise ValueError(f"memory not found: {memory_id}")
+        feedback = list(memory.get("review_feedback_json") or [])
+        feedback.append({"action": action, "note": note, "at": _now()})
+        self.conn.execute(
+            "UPDATE memories SET review_feedback_json=?, updated_at=? WHERE id=?",
+            (json.dumps(feedback, ensure_ascii=False), _now(), memory_id),
+        )
+        self.conn.commit()
+        return self.get_memory(memory_id) or {}
+
+    def promote(self, memory_id: str, note: str = "") -> dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory is None:
+            raise ValueError(f"memory not found: {memory_id}")
+        review = dict(memory.get("review_json") or {})
+        review["manual_review"] = {"action": "promote", "note": note, "at": _now()}
+        self.set_status(memory_id, "active", review)
+        return self.add_review_feedback(memory_id, "promote", note)
+
+    def reject(self, memory_id: str, note: str = "") -> dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory is None:
+            raise ValueError(f"memory not found: {memory_id}")
+        review = dict(memory.get("review_json") or {})
+        review["manual_review"] = {"action": "reject", "note": note, "at": _now()}
+        self.set_status(memory_id, "rejected", review)
+        return self.add_review_feedback(memory_id, "reject", note)
+
+    def delete(self, memory_id: str, note: str = "") -> dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory is None:
+            raise ValueError(f"memory not found: {memory_id}")
+        review = dict(memory.get("review_json") or {})
+        review["manual_review"] = {"action": "delete", "note": note, "at": _now()}
+        self.set_status(memory_id, "deleted", review)
+        return self.add_review_feedback(memory_id, "delete", note)
+
+    def expire_due(self) -> list[dict[str, Any]]:
+        now = _now()
+        rows = self.conn.execute(
+            """
+            SELECT * FROM memories
+            WHERE status='active' AND expires_at IS NOT NULL AND expires_at <= ?
+            ORDER BY expires_at ASC
+            """,
+            (now,),
+        ).fetchall()
+        expired = []
+        for row in rows:
+            item = _row_to_dict(row)
+            review = dict(item.get("review_json") or {})
+            review["expired_at"] = now
+            self.set_status(str(item["id"]), "superseded", review)
+            expired.append(self.get_memory(str(item["id"])) or item)
+        return expired
+
+    def reconcile_audit_events(self) -> int:
+        cur = self.conn.execute(
+            """
+            UPDATE events
+            SET processed_at=created_at
+            WHERE processed_at IS NULL
+              AND process_error IS NULL
+              AND event_type IN ('session_start','session_end','precompact','after_tool_call')
+            """
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def mark_filed(self, memory_id: str, drawer_id: str | None, triple_ids: list[str]) -> None:
+        self.conn.execute(
+            """
+            UPDATE memories
+            SET mempalace_drawer_id=?, kg_triple_ids_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (drawer_id, json.dumps(triple_ids, ensure_ascii=False), _now(), memory_id),
+        )
+        self.conn.commit()
+
+    def link_related_active_memories(self, memory_id: str) -> int:
+        memory = self.get_memory(memory_id)
+        if not memory or memory.get("status") != "active":
+            return 0
+        rows = self.conn.execute(
+            """
+            SELECT * FROM memories
+            WHERE status='active' AND id<>?
+              AND (scope='global' OR project_key IS ? OR project_key=?)
+            ORDER BY created_at DESC LIMIT 200
+            """,
+            (memory_id, memory.get("project_key"), memory.get("project_key")),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            other = _row_to_dict(row)
+            relation, weight, evidence = _edge_for(memory, other)
+            if not relation:
+                continue
+            self.upsert_edge(str(memory["id"]), str(other["id"]), relation, weight, evidence)
+            self.upsert_edge(str(other["id"]), str(memory["id"]), relation, weight, evidence)
+            count += 2
+        return count
+
+    def upsert_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        relation: str,
+        weight: float,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO memory_edges(id,source_id,target_id,relation,weight,evidence_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_id,target_id,relation)
+            DO UPDATE SET weight=max(memory_edges.weight, excluded.weight),
+                          evidence_json=excluded.evidence_json,
+                          updated_at=excluded.updated_at
+            """,
+            (
+                _id("edge"),
+                source_id,
+                target_id,
+                relation,
+                max(0.0, min(1.0, float(weight))),
+                json.dumps(evidence or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+    def list_edges(self, memory_ids: list[str] | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 2000))
+        if memory_ids:
+            placeholders = ",".join("?" for _ in memory_ids)
+            rows = self.conn.execute(
+                f"""
+                SELECT * FROM memory_edges
+                WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})
+                ORDER BY weight DESC, updated_at DESC LIMIT ?
+                """,
+                (*memory_ids, *memory_ids, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM memory_edges ORDER BY weight DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [_edge_row_to_dict(row) for row in rows]
+
+    def list_recallable_memories(
+        self,
+        cwd: str | None = None,
+        session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 500))
+        project_key = project_key_for_cwd(cwd)
+        rows = self.conn.execute(
+            """
+            SELECT * FROM memories
+            WHERE status='active'
+              AND (
+                scope='global'
+                OR (scope='project' AND (project_key=? OR project_key IS NULL))
+                OR (scope='session' AND source_session_id=?)
+              )
+            ORDER BY strength DESC, importance DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (project_key, session_id, limit),
+        ).fetchall()
+        memories = [_row_to_dict(row) for row in rows]
+        filtered = []
+        for memory in memories:
+            decision = self.memory_policy_decision(memory, "recall_gate")
+            if decision and decision.get("action") == "suppress":
+                continue
+            filtered.append(memory)
+        return filtered
+
+    def record_recall(
+        self,
+        prompt: str,
+        route: dict[str, Any],
+        memories: list[dict[str, Any]],
+        cwd: str | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> str | None:
+        if not memories:
+            return None
+        now = _now()
+        recall_id = _id("recall")
+        memory_ids = [str(item["id"]) for item in memories if item.get("id")]
+        self.conn.execute(
+            """
+            INSERT INTO recall_events(id,prompt,route_json,memory_ids_json,cwd,project_key,session_id,turn_id,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                recall_id,
+                prompt,
+                json.dumps(route, ensure_ascii=False),
+                json.dumps(memory_ids, ensure_ascii=False),
+                cwd,
+                project_key_for_cwd(cwd),
+                session_id,
+                turn_id,
+                now,
+                now,
+            ),
+        )
+        for memory_id in memory_ids:
+            self.conn.execute(
+                """
+                UPDATE memories
+                SET recall_count=recall_count+1,
+                    last_recalled_at=?,
+                    strength=min(3.0, strength+0.05),
+                    updated_at=?
+                WHERE id=?
+                """,
+                (now, now, memory_id),
+            )
+        for index, source_id in enumerate(memory_ids):
+            for target_id in memory_ids[index + 1 :]:
+                self.upsert_edge(source_id, target_id, "co_recalled", 0.55, {"recall_id": recall_id})
+                self.upsert_edge(target_id, source_id, "co_recalled", 0.55, {"recall_id": recall_id})
+        self.conn.commit()
+        return recall_id
+
+    def record_recall_outcome(
+        self,
+        session_id: str | None,
+        turn_id: str | None,
+        assistant_message: str,
+    ) -> dict[str, Any]:
+        if not session_id or not turn_id:
+            return {"updated": 0, "reason": "missing_session_or_turn"}
+        row = self.conn.execute(
+            """
+            SELECT * FROM recall_events
+            WHERE session_id=? AND turn_id=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (session_id, turn_id),
+        ).fetchone()
+        if row is None:
+            return {"updated": 0, "reason": "no_recall_event"}
+        event = _recall_row_to_dict(row)
+        memory_ids = [str(item) for item in event.get("memory_ids_json") or []]
+        memories = [self.get_memory(memory_id) for memory_id in memory_ids]
+        adopted = [
+            str(memory["id"])
+            for memory in memories
+            if memory and _assistant_uses_memory(assistant_message, memory)
+        ]
+        now = _now()
+        outcome = {"assistant_used_memory_ids": adopted, "assistant_message_chars": len(assistant_message), "at": now}
+        self.conn.execute(
+            "UPDATE recall_events SET outcome_json=?, updated_at=? WHERE id=?",
+            (json.dumps(outcome, ensure_ascii=False), now, event["id"]),
+        )
+        for memory_id in adopted:
+            self.conn.execute(
+                """
+                UPDATE memories
+                SET positive_recall_count=positive_recall_count+1,
+                    strength=min(3.0, strength+0.15),
+                    updated_at=?
+                WHERE id=?
+                """,
+                (now, memory_id),
+            )
+        self.conn.commit()
+        return {"updated": len(adopted), "recall_id": event["id"], "adopted": adopted}
+
+    def register_recall_feedback(self, memory_id: str, outcome: str, note: str = "") -> dict[str, Any]:
+        if outcome not in {"positive", "negative"}:
+            raise ValueError("outcome must be positive or negative")
+        column = "positive_recall_count" if outcome == "positive" else "negative_recall_count"
+        delta = 0.2 if outcome == "positive" else -0.35
+        self.conn.execute(
+            f"""
+            UPDATE memories
+            SET {column}={column}+1,
+                strength=max(0.1, min(3.0, strength+?)),
+                updated_at=?
+            WHERE id=?
+            """,
+            (delta, _now(), memory_id),
+        )
+        self.conn.commit()
+        return self.add_review_feedback(memory_id, f"recall_{outcome}", note)
+
+    def adjust_strength(self, memory_id: str, delta: float, note: str) -> dict[str, Any]:
+        self.conn.execute(
+            """
+            UPDATE memories
+            SET strength=max(0.1, min(3.0, strength+?)),
+                updated_at=?
+            WHERE id=?
+            """,
+            (float(delta), _now(), memory_id),
+        )
+        self.conn.commit()
+        return self.add_review_feedback(memory_id, "governance_strength_adjust", note)
+
+    def record_governance_report(self, report: dict[str, Any], actions: list[dict[str, Any]]) -> str:
+        report_id = _id("gov")
+        self.conn.execute(
+            """
+            INSERT INTO governance_reports(id,report_json,actions_json,created_at)
+            VALUES(?,?,?,?)
+            """,
+            (
+                report_id,
+                json.dumps(report, ensure_ascii=False),
+                json.dumps(actions, ensure_ascii=False),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+        return report_id
+
+    def add_governance_policy(
+        self,
+        policy_type: str,
+        matcher: dict[str, Any],
+        action: str,
+        reason: str,
+        source_memory_id: str | None = None,
+        ttl_days: int | None = 90,
+    ) -> str:
+        existing = self.conn.execute(
+            """
+            SELECT * FROM governance_policies
+            WHERE policy_type=? AND matcher_json=? AND action=? AND active=1
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (policy_type, json.dumps(matcher, ensure_ascii=False, sort_keys=True), action),
+        ).fetchone()
+        if existing:
+            return str(existing["id"])
+        policy_id = _id("policy")
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO governance_policies(id,policy_type,matcher_json,action,reason,source_memory_id,expires_at,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                policy_id,
+                policy_type,
+                json.dumps(matcher, ensure_ascii=False, sort_keys=True),
+                action,
+                reason,
+                source_memory_id,
+                _days_from_now(ttl_days) if ttl_days else None,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        return policy_id
+
+    def list_governance_policies(self, policy_type: str | None = None, active: bool = True) -> list[dict[str, Any]]:
+        self.expire_governance_policies()
+        if policy_type:
+            rows = self.conn.execute(
+                "SELECT * FROM governance_policies WHERE policy_type=? AND active=? ORDER BY created_at DESC",
+                (policy_type, 1 if active else 0),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM governance_policies WHERE active=? ORDER BY created_at DESC",
+                (1 if active else 0,),
+            ).fetchall()
+        return [_policy_row_to_dict(row) for row in rows]
+
+    def candidate_policy_decision(self, candidate: MemoryCandidate) -> dict[str, Any] | None:
+        candidate = enrich_candidate(candidate)
+        policies = self.list_governance_policies(policy_type="candidate_gate", active=True)
+        for policy in policies:
+            matcher = policy.get("matcher_json") or {}
+            if _matches_policy(candidate.to_dict(), matcher):
+                now = _now()
+                self.conn.execute(
+                    "UPDATE governance_policies SET hit_count=hit_count+1,last_hit_at=?,updated_at=? WHERE id=?",
+                    (now, now, policy["id"]),
+                )
+                self.conn.commit()
+                return {
+                    "policy_id": policy["id"],
+                    "action": policy["action"],
+                    "reason": policy["reason"],
+                    "matcher": matcher,
+                    "source_memory_id": policy.get("source_memory_id"),
+                }
+        return None
+
+    def memory_policy_decision(self, memory: dict[str, Any], policy_type: str) -> dict[str, Any] | None:
+        policies = self.list_governance_policies(policy_type=policy_type, active=True)
+        for policy in policies:
+            matcher = policy.get("matcher_json") or {}
+            if _matches_policy(memory, matcher):
+                now = _now()
+                self.conn.execute(
+                    "UPDATE governance_policies SET hit_count=hit_count+1,last_hit_at=?,updated_at=? WHERE id=?",
+                    (now, now, policy["id"]),
+                )
+                self.conn.commit()
+                return {
+                    "policy_id": policy["id"],
+                    "action": policy["action"],
+                    "reason": policy["reason"],
+                    "matcher": matcher,
+                    "source_memory_id": policy.get("source_memory_id"),
+                }
+        return None
+
+    def expire_governance_policies(self) -> int:
+        now = _now()
+        cur = self.conn.execute(
+            """
+            UPDATE governance_policies
+            SET active=0, updated_at=?
+            WHERE active=1 AND expires_at IS NOT NULL AND expires_at <= ?
+            """,
+            (now, now),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def set_governance_state(self, key: str, value: Any) -> None:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO governance_state(key,value,updated_at)
+            VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (key, json.dumps(value, ensure_ascii=False), now),
+        )
+        self.conn.commit()
+
+    def get_governance_state(self, key: str) -> Any:
+        row = self.conn.execute("SELECT value FROM governance_state WHERE key=?", (key,)).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def latest_recall_event(self, session_id: str | None = None) -> dict[str, Any] | None:
+        if session_id:
+            row = self.conn.execute(
+                "SELECT * FROM recall_events WHERE session_id=? ORDER BY created_at DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT * FROM recall_events ORDER BY created_at DESC LIMIT 1").fetchone()
+        return _recall_row_to_dict(row) if row else None
+
+    def list_recall_events(self, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 5000))
+        rows = self.conn.execute(
+            "SELECT * FROM recall_events ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_recall_row_to_dict(row) for row in rows]
+
+    def set_status(self, memory_id: str, status: str, review: dict[str, Any] | None = None) -> None:
+        if review is None:
+            self.conn.execute("UPDATE memories SET status=?, updated_at=? WHERE id=?", (status, _now(), memory_id))
+        else:
+            self.conn.execute(
+                "UPDATE memories SET status=?, review_json=?, updated_at=? WHERE id=?",
+                (status, json.dumps(review, ensure_ascii=False), _now(), memory_id),
+            )
+        self.conn.commit()
+
+    def list_memories(self, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 200))
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM memories WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def stats(self) -> dict[str, Any]:
+        rows = self.conn.execute("SELECT status, COUNT(*) AS count FROM memories GROUP BY status").fetchall()
+        pending = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM events WHERE processed_at IS NULL AND process_error IS NULL"
+        ).fetchone()["count"]
+        failed = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM events WHERE processed_at IS NULL AND process_error IS NOT NULL"
+        ).fetchone()["count"]
+        return {
+            "ledger_path": str(self.path),
+            "by_status": {row["status"]: row["count"] for row in rows},
+            "events": {"pending": pending, "failed": failed},
+        }
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    for key in ("evidence_json", "review_json", "kg_triple_ids_json", "review_feedback_json", "triggers_json"):
+        try:
+            data[key] = json.loads(data[key])
+        except (TypeError, json.JSONDecodeError):
+            data[key] = None
+    return data
+
+
+def _edge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["evidence_json"] = json.loads(data["evidence_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["evidence_json"] = {}
+    return data
+
+
+def _recall_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    for key in ("route_json", "memory_ids_json", "outcome_json"):
+        try:
+            data[key] = json.loads(data[key])
+        except (TypeError, json.JSONDecodeError):
+            data[key] = [] if key == "memory_ids_json" else {}
+    return data
+
+
+def _policy_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["matcher_json"] = json.loads(data["matcher_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["matcher_json"] = {}
+    return data
+
+
+def _id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:24]}"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _days_from_now(days: int | None) -> str | None:
+    if days is None:
+        return None
+    return (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=days)).isoformat().replace("+00:00", "Z")
+
+
+def project_key_for_cwd(cwd: str | None) -> str | None:
+    if not cwd:
+        return None
+    try:
+        return str(Path(cwd).expanduser().resolve()).lower()
+    except OSError:
+        return str(Path(cwd).expanduser()).lower()
+
+
+def _expiry_for_ttl(ttl: str) -> str | None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    if ttl == "short":
+        return (now + timedelta(days=7)).isoformat().replace("+00:00", "Z")
+    if ttl == "session":
+        return (now + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+    return None
+
+
+def _normalize(text: str) -> str:
+    return "".join(text.lower().split()).strip("。.!！?")
+
+
+def _tokens(text: str) -> set[str]:
+    return {part for part in re_split(text.lower()) if len(part) >= 2}
+
+
+def _matches_policy(candidate: dict[str, Any], matcher: dict[str, Any]) -> bool:
+    expected_id = matcher.get("memory_id")
+    if expected_id and candidate.get("id") != expected_id:
+        return False
+    for key in ("memory_type", "scope", "domain", "category", "subcategory"):
+        expected = matcher.get(key)
+        actual = candidate.get("type") or candidate.get("memory_type") if key == "memory_type" else candidate.get(key)
+        if expected and actual != expected:
+            return False
+    candidate_terms = set(str(item).lower() for item in candidate.get("triggers") or [])
+    candidate_terms.update(_tokens(str(candidate.get("content") or "")))
+    required_terms = set(str(item).lower() for item in matcher.get("terms") or [])
+    if required_terms and len(candidate_terms & required_terms) < min(2, len(required_terms)):
+        return False
+    return True
+
+
+def _scope_filter(scope: str) -> str:
+    if scope == "project":
+        return "(project_key=? OR project_key IS NULL)"
+    if scope == "session":
+        return "source_session_id=?"
+    return "1=1"
+
+
+def _scope_params(scope: str, project_key: str | None, session_id: str | None) -> tuple[Any, ...]:
+    if scope == "project":
+        return (project_key,)
+    if scope == "session":
+        return (session_id,)
+    return ()
+
+
+def _edge_for(left: dict[str, Any], right: dict[str, Any]) -> tuple[str | None, float, dict[str, Any]]:
+    if left.get("scope") == "project" and right.get("scope") == "project":
+        left_key = left.get("project_key")
+        right_key = right.get("project_key")
+        if left_key and right_key and left_key != right_key:
+            return None, 0.0, {}
+    triggers = set(str(item).lower() for item in left.get("triggers_json") or [])
+    other_triggers = set(str(item).lower() for item in right.get("triggers_json") or [])
+    shared = sorted(triggers & other_triggers)
+    if left.get("domain") == right.get("domain") and left.get("subcategory") == right.get("subcategory"):
+        return "same_subcategory", 0.8, {"domain": left.get("domain"), "subcategory": left.get("subcategory")}
+    if len(shared) >= 2:
+        return "shared_triggers", 0.7, {"shared_triggers": shared[:8]}
+    if left.get("domain") == right.get("domain") and left.get("category") == right.get("category"):
+        return "same_category", 0.6, {"domain": left.get("domain"), "category": left.get("category")}
+    return None, 0.0, {}
+
+
+def _assistant_uses_memory(assistant_message: str, memory: dict[str, Any]) -> bool:
+    text = assistant_message.lower()
+    if not text:
+        return False
+    triggers = [str(item).lower() for item in memory.get("triggers_json") or [] if len(str(item).strip()) >= 2]
+    if any(trigger in text for trigger in triggers[:8]):
+        return True
+    content_tokens = _tokens(str(memory.get("content") or ""))
+    assistant_tokens = _tokens(text)
+    return len(content_tokens & assistant_tokens) >= 2
+
+
+def re_split(text: str) -> list[str]:
+    import re
+
+    return re.findall(r"[\w\u4e00-\u9fff]+", text)
+
+
+def _polarity(text: str) -> int:
+    lowered = text.lower()
+    negative = ("不", "不是", "不能", "不要", "禁用", "关闭", "disable", "not ", "never")
+    positive = ("要", "应该", "必须", "启用", "打开", "enable", "always")
+    if any(item in lowered for item in negative):
+        return -1
+    if any(item in lowered for item in positive):
+        return 1
+    return 0

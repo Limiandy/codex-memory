@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" session_start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" session_end"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" precompact"
+          }
+        ]
+      }
+    ]
+  }
+}

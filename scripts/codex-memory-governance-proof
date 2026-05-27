@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+from codex_memory.config import Config
+from codex_memory.schema import Evidence, MemoryCandidate
+from codex_memory.service import MemoryService
+
+
+def main() -> int:
+    os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
+    os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
+    with tempfile.TemporaryDirectory() as tmp:
+        service = _service(tmp)
+        try:
+            report = {
+                "scenarios": [
+                    _scenario_noise_suppression(service),
+                    _scenario_negative_feedback_repairs_policy(service),
+                    _scenario_living_policy_repairs_admission_and_recall(service),
+                    _scenario_dynamic_budget(service),
+                    _scenario_periodic_governance(service),
+                    _scenario_mempalace_reconcile(service),
+                ]
+            }
+            report["passed"] = all(item["passed"] for item in report["scenarios"])
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 0 if report["passed"] else 1
+        finally:
+            service.close()
+
+
+def _service(tmp: str) -> MemoryService:
+    path = Path(tmp)
+    config = Config(
+        model="gpt-5.4-mini",
+        state_dir=path,
+        ledger_path=path / "ledger.sqlite3",
+        palace_path=None,
+        min_active_confidence=0.82,
+        min_quarantine_confidence=0.62,
+        duplicate_threshold=0.9,
+        max_evidence_quote_chars=500,
+    )
+    return MemoryService(config)
+
+
+def _candidate(content: str, triggers: list[str] | None = None) -> MemoryCandidate:
+    return MemoryCandidate(
+        content=content,
+        memory_type="experience",
+        proposed_action="store",
+        confidence=0.95,
+        importance=0.86,
+        ttl="long",
+        scope="global",
+        domain="software_engineering",
+        category="lesson",
+        subcategory="testing",
+        abstraction_level="principle",
+        triggers=triggers or ["测试", "质量"],
+        evidence=[Evidence(source="user_message", quote=content)],
+        reason="governance proof scenario",
+    )
+
+
+def _scenario_noise_suppression(service: MemoryService) -> dict:
+    memory_id = service.ledger.add_candidate(
+        _candidate("经验：测试质量要结合覆盖率、边界用例和真实运行报告。"),
+        "active",
+        {"status": "active"},
+    )
+    for index in range(5):
+        service.ledger.record_recall(
+            f"测试质量怎么判断 {index}",
+            {"domain": "software_engineering"},
+            [service.ledger.get_memory(memory_id)],
+            session_id="noise",
+            turn_id=f"t{index}",
+        )
+    before = service.ledger.get_memory(memory_id)
+    result = service.govern_memories(apply=True)
+    after = service.ledger.get_memory(memory_id)
+    passed = after["strength"] < before["strength"] and after["status"] == "active"
+    return {
+        "name": "noise_suppression",
+        "goal": "高频注入但无正向采用时自动降权，减少未来无效提示词注入",
+        "before": {"strength": before["strength"], "status": before["status"]},
+        "after": {"strength": after["strength"], "status": after["status"]},
+        "actions": result["applied_actions"],
+        "passed": passed,
+    }
+
+
+def _scenario_negative_feedback_repairs_policy(service: MemoryService) -> dict:
+    bad_id = service.ledger.add_candidate(
+        _candidate("经验：所有项目都必须注入这条很宽泛的测试建议。"),
+        "active",
+        {"status": "active"},
+    )
+    similar_id = service.ledger.add_candidate(
+        _candidate("经验：所有项目都必须注入这条测试建议，并且保持长期提示。"),
+        "active",
+        {"status": "active"},
+    )
+    service.recall_feedback(bad_id, "negative", "误导")
+    service.recall_feedback(bad_id, "negative", "无效")
+    result = service.govern_memories(apply=True)
+    future_decision = service.ledger.candidate_policy_decision(
+        _candidate("经验：测试质量必须注入所有项目，且测试建议要一直加入上下文。")
+    )
+    bad = service.ledger.get_memory(bad_id)
+    similar = service.ledger.get_memory(similar_id)
+    passed = (
+        bad["status"] == "quarantined"
+        and similar["status"] == "quarantined"
+        and future_decision is not None
+        and future_decision["action"] == "quarantine"
+    )
+    return {
+        "name": "negative_feedback_policy_repair",
+        "goal": "负反馈不是只写报告，而是隔离当前坏记忆、准出相似记忆、修复未来准入",
+        "bad_status": bad["status"],
+        "similar_status": similar["status"],
+        "future_policy_action": future_decision["action"] if future_decision else None,
+        "actions": result["applied_actions"],
+        "passed": passed,
+    }
+
+
+def _scenario_living_policy_repairs_admission_and_recall(service: MemoryService) -> dict:
+    duplicate_a = service.ledger.add_candidate(
+        _candidate("经验：hook 内部调用 codex exec 必须设置 internal 标记，否则会递归触发。", ["hook", "codex", "internal"]),
+        "active",
+        {"status": "active"},
+    )
+    duplicate_b = service.ledger.add_candidate(
+        _candidate("在 hook 内部调用 `codex exec` 时，必须设置 `internal` 标记，否则会递归触发。", ["hook", "codex", "internal"]),
+        "active",
+        {"status": "active"},
+    )
+    noisy_id = service.ledger.add_candidate(
+        _candidate("经验：所有测试问题都要反复注入这条泛化提示。", ["测试", "注入", "质量"]),
+        "active",
+        {"status": "active"},
+    )
+    noisy_memory = service.ledger.get_memory(noisy_id)
+    for index in range(5):
+        service.ledger.record_recall(f"测试质量 {index}", {"domain": "software_engineering"}, [noisy_memory])
+
+    result = service.govern_memories(apply=True)
+    future_duplicate = service.ledger.candidate_policy_decision(
+        _candidate("hook 调用 codex exec 必须设置 internal，否则会递归触发。", ["hook", "codex", "internal"])
+    )
+    recallable = {memory["id"] for memory in service.ledger.list_recallable_memories(limit=50)}
+    statuses = {
+        duplicate_a: service.ledger.get_memory(duplicate_a)["status"],
+        duplicate_b: service.ledger.get_memory(duplicate_b)["status"],
+        noisy_id: service.ledger.get_memory(noisy_id)["status"],
+    }
+    policy_actions = [
+        action
+        for action in result["applied_actions"]
+        if action.get("action") == "create_policy"
+        and action.get("policy_type") in {"candidate_gate", "recall_gate"}
+    ]
+    passed = (
+        "active" in statuses.values()
+        and "superseded" in statuses.values()
+        and future_duplicate is not None
+        and future_duplicate["action"] == "supersede"
+        and noisy_id not in recallable
+        and any(action.get("policy_type") == "candidate_gate" and action.get("policy_action") == "supersede" for action in policy_actions)
+        and any(action.get("policy_type") == "recall_gate" and action.get("policy_action") == "suppress" for action in policy_actions)
+    )
+    return {
+        "name": "living_policy_self_repair",
+        "goal": "治理把失败归因反写成动态 policy，后续准入和准出自动改变行为",
+        "duplicate_statuses": statuses,
+        "future_duplicate_action": future_duplicate["action"] if future_duplicate else None,
+        "noisy_memory_recallable": noisy_id in recallable,
+        "policy_actions": policy_actions,
+        "passed": passed,
+    }
+
+
+def _scenario_dynamic_budget(service: MemoryService) -> dict:
+    ids = []
+    for index in range(6):
+        ids.append(
+            service.ledger.add_candidate(
+                _candidate(f"经验：测试质量规则 {index}。", triggers=["测试", "质量", str(index)]),
+                "active",
+                {"status": "active"},
+            )
+        )
+    memories = [service.ledger.get_memory(memory_id) for memory_id in ids]
+    for index in range(4):
+        service.ledger.record_recall(f"测试 {index}", {"domain": "software_engineering"}, memories)
+    context = service.prompt_context("测试", limit=6)
+    injected = context.count("\n- ")
+    passed = injected <= 2
+    return {
+        "name": "dynamic_injection_budget",
+        "goal": "近期注入压力过高且当前 prompt 很短时，自动压缩注入预算",
+        "requested_limit": 6,
+        "actual_injected": injected,
+        "passed": passed,
+    }
+
+
+def _scenario_periodic_governance(service: MemoryService) -> dict:
+    first = service.periodic_governance(interval_minutes=60)
+    second = service.periodic_governance(interval_minutes=60)
+    passed = "report" in first and second.get("skipped") == "not_due"
+    return {
+        "name": "periodic_governance",
+        "goal": "治理能自动按周期运行，避免依赖用户定时审计",
+        "first_result": "ran" if "report" in first else first,
+        "second_result": second,
+        "passed": passed,
+    }
+
+
+def _scenario_mempalace_reconcile(service: MemoryService) -> dict:
+    memory_id = service.ledger.add_candidate(
+        _candidate("经验：测试质量要结合覆盖率、边界用例和真实运行报告。"),
+        "active",
+        {"status": "active"},
+    )
+    result = service.reconcile_mempalace(apply=True)
+    passed = bool(result["applied"]) and result["applied"][0]["action"] == "file_missing_active"
+    return {
+        "name": "ledger_mempalace_reconcile",
+        "goal": "active 记忆缺少 MemPalace 写入记录时能被对账发现并修复",
+        "memory_id": memory_id,
+        "result": result,
+        "passed": passed,
+    }
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

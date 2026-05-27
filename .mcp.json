@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codex-memory": {
+      "command": "/Users/limengkai/plugins/codex-memory/scripts/codex-memory-mcp",
+      "args": []
+    }
+  }
+}

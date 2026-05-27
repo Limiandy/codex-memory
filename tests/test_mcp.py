@@ -1,0 +1,112 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class McpTest(unittest.TestCase):
+    def test_mcp_initialize_and_list_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_FAKE_MODEL": "1",
+                "CODEX_MEMORY_DISABLE_MEMPALACE": "1",
+                "CODEX_MEMORY_STATE_DIR": tmp,
+            }
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "codex_memory.mcp_server"],
+                cwd=".",
+                env={**os.environ, **env},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert proc.stdin is not None
+                assert proc.stdout is not None
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}) + "\n")
+                proc.stdin.flush()
+                first = json.loads(proc.stdout.readline())
+                second = json.loads(proc.stdout.readline())
+                self.assertEqual(first["result"]["serverInfo"]["name"], "codex-memory")
+                names = {tool["name"] for tool in second["result"]["tools"]}
+                self.assertIn("codex_memory_search", names)
+                self.assertIn("codex_memory_diagnostics", names)
+                self.assertIn("codex_memory_promote", names)
+                self.assertIn("codex_memory_audit", names)
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+    def test_mcp_status_and_queue_are_lightweight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_STATE_DIR": tmp,
+            }
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "codex_memory.mcp_server"],
+                cwd=".",
+                env={**os.environ, **env},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert proc.stdin is not None
+                assert proc.stdout is not None
+                calls = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_status", "arguments": {}},
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_queue", "arguments": {"limit": 5}},
+                    },
+                ]
+                for call in calls:
+                    proc.stdin.write(json.dumps(call) + "\n")
+                proc.stdin.flush()
+                json.loads(proc.stdout.readline())
+                status = json.loads(proc.stdout.readline())
+                queue = json.loads(proc.stdout.readline())
+                status_text = json.loads(status["result"]["content"][0]["text"])
+                queue_text = json.loads(queue["result"]["content"][0]["text"])
+                self.assertEqual(status_text["mempalace"]["status"], "not_loaded")
+                self.assertEqual(queue_text, [])
+                self.assertTrue((Path(tmp) / "ledger.sqlite3").exists())
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)

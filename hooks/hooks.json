@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/codex-memory-hook.sh\" session_start",
+            "statusMessage": "Loading Codex Memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/codex-memory-hook.sh\" user_message",
+            "statusMessage": "Reviewing memory context"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/codex-memory-hook.sh\" after_tool_call",
+            "statusMessage": "Capturing tool result"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/codex-memory-hook.sh\" session_end",
+            "statusMessage": "Saving Codex Memory checkpoint"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/hooks/codex-memory-hook.sh\" precompact",
+            "statusMessage": "Saving Codex Memory before compaction"
+          }
+        ]
+      }
+    ]
+  }
+}

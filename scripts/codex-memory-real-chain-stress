@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import mean
+from typing import Any
+
+
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+HOOK = PLUGIN_ROOT / "hooks" / "codex-memory-hook.sh"
+CLI = PLUGIN_ROOT / "scripts" / "codex-memory"
+REPORT_PATH = Path("/private/tmp/codex-memory-real-chain-stress-report.json")
+
+
+SCENARIOS = [
+    ("noise", "这是一条普通测试消息。", "neutral", "/tmp/projects/codex-memory"),
+    ("preference_language", "请记住，默认用中文回答，并且尽量简洁。", "use", "/tmp/projects/codex-memory"),
+    ("preference_no_emoji", "记住，不要主动使用 emoji。", "use", "/tmp/projects/codex-memory"),
+    ("project_boundary", "项目架构决策：MCP 和 hook 必须是两条不重叠的路径，不能互相调用。", "use", "/tmp/projects/codex-memory"),
+    ("project_boundary_duplicate", "项目架构上，MCP 与 hook 需要保持两条不重叠路径，不能互相调用。", "use", "/tmp/projects/codex-memory"),
+    ("project_boundary_conflict", "项目架构变更：MCP 和 hook 应该互相调用，形成统一链路。", "ignore", "/tmp/projects/codex-memory"),
+    ("hook_recursion", "经验：如果 hook 内部调用 codex exec，必须设置 internal 标记，否则会递归触发。", "use", "/tmp/projects/codex-memory"),
+    ("secret_openai", "临时测试：api_key = sk-testShouldNeverBeStored1234567890", "neutral", "/tmp/projects/codex-memory"),
+    ("secret_github", "临时测试：github token ghp_shouldNeverBeStored1234567890abcd", "neutral", "/tmp/projects/codex-memory"),
+    ("temporary_debug", "这次只需要临时打开 debug 日志，之后可以关闭。", "neutral", "/tmp/projects/codex-memory"),
+    ("task_resume", "下一步继续跑治理闭环测试，并检查动态 policy 命中。", "neutral", "/tmp/projects/codex-memory"),
+    ("fact_model", "事实：codex-memory 使用 GPT-5.4-Mini 作为 memory-engine 和 memory-review 模型。", "use", "/tmp/projects/codex-memory"),
+    ("logging_pretty", "经验：面向人类排查的 JSONL 日志必须提供 pretty 视图。", "use", "/tmp/projects/codex-memory"),
+    ("governance_living_policy", "治理规则不能是死的，要能通过动态 policy 自我修复准入和准出。", "use", "/tmp/projects/codex-memory"),
+    ("bad_overbroad_testing", "经验：所有测试建议都要长期注入每次回答。", "ignore", "/tmp/projects/codex-memory"),
+    ("bad_generic_process", "经验：所有项目都应该每次注入完整流程提醒。", "ignore", "/tmp/projects/codex-memory"),
+    ("vue_admin", "Vue 管理平台经验：表单权限、路由守卫和接口封装要分层。", "use", "/tmp/projects/vue-admin"),
+    ("react_portal", "React 门户经验：状态边界、接口缓存和首屏加载预算要明确。", "use", "/tmp/projects/react-portal"),
+    ("jquery_legacy", "jQuery 老项目迁移经验：先隔离 DOM 操作和接口调用，再逐步抽出可替换模块。", "use", "/tmp/projects/jquery-legacy"),
+    ("miniapp_release", "小程序项目经验：发布前要检查分包体积、权限声明和体验版验证。", "use", "/tmp/projects/miniapp"),
+    ("frontend_cross_project", "前端通用经验：Vue、React、jQuery 项目都要抽象接口边界和状态边界。", "use", "/tmp/projects/frontend-lab"),
+    ("admin_project_type", "管理平台项目经验：权限、审计日志、批量操作和导出流程要作为基础能力设计。", "use", "/tmp/projects/admin-platform"),
+    ("portal_project_type", "门户项目经验：首页首屏、SEO、缓存和内容发布链路要提前设计。", "use", "/tmp/projects/portal"),
+    ("life_lighting", "生活经验：电灯不亮时先检查灯泡、开关、插座和空开。", "use", "/tmp/life/home"),
+    ("life_network", "生活经验：家里网络不稳定时先确认光猫、路由器、DNS 和运营商告警。", "use", "/tmp/life/home"),
+    ("water_gate", "水利工程经验：闸门调度异常时先核对上下游水位、传感器读数和执行机构状态。", "use", "/tmp/projects/water-engineering"),
+    ("water_pump", "水利工程经验：泵站异常要检查电源、液位、泵组振动和控制柜告警。", "use", "/tmp/projects/water-engineering"),
+    ("weak_inference", "我感觉可能应该记住这件事，但还没有明确结论。", "neutral", "/tmp/projects/codex-memory"),
+    ("relationship_weak", "也许我以后会喜欢更长的解释。", "neutral", "/tmp/projects/codex-memory"),
+    ("negative_feedback", "不对，这条记忆误导了回答。", "negative", "/tmp/projects/codex-memory"),
+    ("positive_feedback", "对了，刚才那条记忆有用。", "positive", "/tmp/projects/codex-memory"),
+]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run broad real Codex Memory hook chain stress test.")
+    parser.add_argument("--rounds", type=int, default=500)
+    parser.add_argument("--govern-every", type=int, default=25)
+    parser.add_argument("--wait-timeout", type=int, default=180)
+    parser.add_argument("--state-dir", default="/private/tmp/codex-memory-real-chain-state")
+    parser.add_argument("--mempalace-dir", default="/private/tmp/codex-memory-real-chain-mempalace")
+    parser.add_argument("--log-dir", default="/private/tmp/codex-memory-real-chain-logs")
+    parser.add_argument("--clear-before", action="store_true")
+    args = parser.parse_args()
+
+    state_dir = Path(args.state_dir)
+    mempalace_dir = Path(args.mempalace_dir)
+    log_dir = Path(args.log_dir)
+    if args.clear_before:
+        for path in (state_dir, mempalace_dir, log_dir):
+            if path.exists():
+                shutil.rmtree(path)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    start = time.time()
+    rounds = []
+    snapshots = []
+    for index in range(args.rounds):
+        kind, text, assistant_mode, cwd = SCENARIOS[index % len(SCENARIOS)]
+        turn_number = index + 1
+        session_id = "real-chain-stress"
+        turn_id = f"real-chain-turn-{turn_number:04d}"
+        prompt = f"[real-{turn_number:04d}/{kind}] {text}"
+        before = event_ids(state_dir)
+        user_result = call_hook("user_message", payload(session_id, turn_id, prompt, cwd, state_dir), state_dir, mempalace_dir, log_dir)
+        event_id = newest_event_id(state_dir, before)
+        processed = wait_event_processed(state_dir, event_id, args.wait_timeout) if event_id else False
+        assistant_message = assistant_response(assistant_mode, user_result)
+        stop_result = call_hook(
+            "session_end",
+            {
+                **payload(session_id, turn_id, "", cwd, state_dir),
+                "hook_event_name": "Stop",
+                "stop_hook_active": False,
+                "last_assistant_message": assistant_message,
+            },
+            state_dir,
+            mempalace_dir,
+            log_dir,
+        )
+        governed = None
+        if turn_number % args.govern_every == 0:
+            before_metrics = metrics(state_dir)
+            governed = govern(state_dir, mempalace_dir, log_dir)
+            after_metrics = metrics(state_dir)
+            snapshots.append({"round": turn_number, "before": before_metrics, "governed": governed, "after": after_metrics})
+        item = {
+            "round": turn_number,
+            "kind": kind,
+            "processed": processed,
+            "event_id": event_id,
+            "user_hook_output": compact_hook_output(user_result),
+            "session_end_output": compact_hook_output(stop_result),
+            "governed": governed is not None,
+            "metrics": compact_metrics(state_dir),
+        }
+        rounds.append(item)
+        write_report(state_dir, mempalace_dir, log_dir, start, args, rounds, snapshots, partial=True)
+        print(
+            f"{turn_number:03d}/{args.rounds} {kind} processed={processed} injected={bool(user_result.get('hookSpecificOutput'))} active={item['metrics'].get('active')}",
+            flush=True,
+        )
+
+    report = write_report(state_dir, mempalace_dir, log_dir, start, args, rounds, snapshots, partial=False)
+    print(f"REPORT {REPORT_PATH}")
+    print(json.dumps(summary(report), ensure_ascii=False, indent=2))
+    return 0 if report["passed"] else 1
+
+
+def payload(session_id: str, turn_id: str, prompt: str, cwd: str, state_dir: Path) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "transcript_path": str(state_dir / "real-chain-transcript.jsonl"),
+        "cwd": cwd,
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.5",
+        "permission_mode": "bypassPermissions",
+        "prompt": prompt,
+    }
+
+
+def call_hook(hook: str, data: dict[str, Any], state_dir: Path, mempalace_dir: Path, log_dir: Path) -> dict[str, Any]:
+    env = os.environ.copy()
+    env.pop("CODEX_MEMORY_FAKE_MODEL", None)
+    env.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
+    env["PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+    env["CODEX_MEMORY_STATE_DIR"] = str(state_dir)
+    env["MEMPALACE_PALACE_PATH"] = str(mempalace_dir)
+    env["CODEX_MEMORY_LOG_DIR"] = str(log_dir)
+    env["CODEX_MEMORY_LOG_LEVEL"] = "DEBUG"
+    proc = subprocess.run(
+        [str(HOOK), hook],
+        input=json.dumps(data, ensure_ascii=False),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or proc.stdout.strip(), "returncode": proc.returncode}
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"raw": proc.stdout}
+
+
+def govern(state_dir: Path, mempalace_dir: Path, log_dir: Path) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["CODEX_MEMORY_STATE_DIR"] = str(state_dir)
+    env["MEMPALACE_PALACE_PATH"] = str(mempalace_dir)
+    env["CODEX_MEMORY_LOG_DIR"] = str(log_dir)
+    proc = subprocess.run([str(CLI), "govern", "--apply"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60)
+    if proc.returncode != 0:
+        return {"error": proc.stderr.strip() or proc.stdout.strip(), "returncode": proc.returncode}
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"raw": proc.stdout}
+
+
+def assistant_response(mode: str, hook_result: dict[str, Any]) -> str:
+    context = hook_result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    if mode == "use" and context:
+        return f"我会采用这些记忆继续处理：{context[:1200]}"
+    if mode == "negative":
+        return "我不会采用刚才那条记忆，因为它误导了回答。"
+    if mode == "positive" and context:
+        return f"刚才这条记忆有用，我会沿用：{context[:800]}"
+    if mode == "ignore":
+        return "这次只基于当前输入回答，不采用历史记忆。"
+    return "收到。"
+
+
+def db_path(state_dir: Path) -> Path:
+    return state_dir / "ledger.sqlite3"
+
+
+def connect(state_dir: Path):
+    return sqlite3.connect(str(db_path(state_dir)), timeout=60)
+
+
+def event_ids(state_dir: Path) -> set[str]:
+    if not db_path(state_dir).exists():
+        return set()
+    with connect(state_dir) as conn:
+        try:
+            return {row[0] for row in conn.execute("SELECT id FROM events")}
+        except sqlite3.OperationalError:
+            return set()
+
+
+def newest_event_id(state_dir: Path, before: set[str]) -> str | None:
+    if not db_path(state_dir).exists():
+        return None
+    with connect(state_dir) as conn:
+        rows = conn.execute("SELECT id FROM events WHERE event_type='user_message' ORDER BY created_at DESC LIMIT 20").fetchall()
+    for (event_id,) in rows:
+        if event_id not in before:
+            return event_id
+    return rows[0][0] if rows else None
+
+
+def wait_event_processed(state_dir: Path, event_id: str, timeout: int) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with connect(state_dir) as conn:
+            row = conn.execute("SELECT processed_at, process_error FROM events WHERE id=?", (event_id,)).fetchone()
+        if row and row[0]:
+            return True
+        if row and row[1]:
+            return False
+        time.sleep(1)
+    return False
+
+
+def metrics(state_dir: Path) -> dict[str, Any]:
+    if not db_path(state_dir).exists():
+        return {"status": {}, "events": {"pending": 0, "failed": 0}}
+    with connect(state_dir) as conn:
+        conn.row_factory = sqlite3.Row
+        status = {row["status"]: row["count"] for row in conn.execute("SELECT status, COUNT(*) count FROM memories GROUP BY status")}
+        events = {
+            "pending": conn.execute("SELECT COUNT(*) count FROM events WHERE processed_at IS NULL AND process_error IS NULL").fetchone()["count"],
+            "failed": conn.execute("SELECT COUNT(*) count FROM events WHERE processed_at IS NULL AND process_error IS NOT NULL").fetchone()["count"],
+        }
+        policies = [_policy(row) for row in conn.execute("SELECT * FROM governance_policies WHERE active=1 ORDER BY created_at")]
+        recalls = [_recall(row) for row in conn.execute("SELECT * FROM recall_events ORDER BY created_at")]
+        active = [_memory(row) for row in conn.execute("SELECT * FROM memories WHERE status='active' ORDER BY created_at")]
+    false_active = [item for item in active if false_active_reasons(item)]
+    recall_sizes = [len(row.get("memory_ids_json") or []) for row in recalls]
+    return {
+        "status": status,
+        "events": events,
+        "active_count": status.get("active", 0),
+        "false_active_count": len(false_active),
+        "false_active": [{"id": item["id"], "content": item["content"], "reasons": false_active_reasons(item)} for item in false_active[:20]],
+        "policy_count": len(policies),
+        "policy_hits": sum(int(policy.get("hit_count") or 0) for policy in policies),
+        "policies": policies,
+        "recall_event_count": len(recalls),
+        "total_injected": sum(recall_sizes),
+        "avg_injected": round(mean(recall_sizes), 3) if recall_sizes else 0,
+        "policy_effects": policy_effects(policies, recalls),
+    }
+
+
+def compact_metrics(state_dir: Path) -> dict[str, Any]:
+    data = metrics(state_dir)
+    return {
+        "active": data["active_count"],
+        "false_active": data["false_active_count"],
+        "policies": data["policy_count"],
+        "policy_hits": data["policy_hits"],
+        "pending": data["events"]["pending"],
+        "failed": data["events"]["failed"],
+    }
+
+
+def policy_effects(policies: list[dict[str, Any]], recalls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    effects = []
+    for policy in policies:
+        source_id = str(policy.get("source_memory_id") or "")
+        created_at = str(policy.get("created_at") or "")
+        before = 0
+        after = 0
+        for recall in recalls:
+            ids = [str(item) for item in recall.get("memory_ids_json") or []]
+            if not source_id or source_id not in ids:
+                continue
+            if str(recall.get("created_at") or "") <= created_at:
+                before += 1
+            else:
+                after += 1
+        effects.append(
+            {
+                "policy_id": policy["id"],
+                "policy_type": policy["policy_type"],
+                "action": policy["action"],
+                "source_memory_id": source_id,
+                "hit_count": policy.get("hit_count"),
+                "source_recalled_before_policy": before,
+                "source_recalled_after_policy": after,
+            }
+        )
+    return effects
+
+
+def false_active_reasons(memory: dict[str, Any]) -> list[str]:
+    content = str(memory.get("content") or "").lower()
+    reasons = []
+    if "sk-" in content or "api_key" in content or "ghp_" in content or "token" in content:
+        reasons.append("secret_like")
+    if memory.get("memory_type") in {"temporary", "task_state"}:
+        reasons.append("temporary_or_task_state")
+    if "这是一条普通测试消息" in content:
+        reasons.append("noise")
+    return reasons
+
+
+def write_report(
+    state_dir: Path,
+    mempalace_dir: Path,
+    log_dir: Path,
+    start: float,
+    args: argparse.Namespace,
+    rounds: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    partial: bool,
+) -> dict[str, Any]:
+    data = metrics(state_dir)
+    passed = (
+        not partial
+        and data["events"]["pending"] == 0
+        and data["events"]["failed"] == 0
+        and data["false_active_count"] == 0
+        and data["policy_count"] >= 1
+        and data["policy_hits"] >= 1
+        and any(effect["source_recalled_before_policy"] > 0 and effect["source_recalled_after_policy"] == 0 for effect in data["policy_effects"])
+    )
+    report = {
+        "passed": passed,
+        "partial": partial,
+        "started_at": iso_now(start),
+        "updated_at": iso_now(time.time()),
+        "duration_seconds": round(time.time() - start, 2),
+        "rounds_requested": args.rounds,
+        "rounds_completed": len(rounds),
+        "govern_every": args.govern_every,
+        "state_dir": str(state_dir),
+        "mempalace_dir": str(mempalace_dir),
+        "log_dir": str(log_dir),
+        "metrics": data,
+        "snapshots": snapshots,
+        "round_samples": rounds[:10] + rounds[-10:],
+    }
+    REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
+def summary(report: dict[str, Any]) -> dict[str, Any]:
+    metrics_data = report["metrics"]
+    return {
+        "passed": report["passed"],
+        "rounds_completed": report["rounds_completed"],
+        "duration_seconds": report["duration_seconds"],
+        "status": metrics_data["status"],
+        "events": metrics_data["events"],
+        "active_count": metrics_data["active_count"],
+        "false_active_count": metrics_data["false_active_count"],
+        "policy_count": metrics_data["policy_count"],
+        "policy_hits": metrics_data["policy_hits"],
+        "recall_event_count": metrics_data["recall_event_count"],
+        "avg_injected": metrics_data["avg_injected"],
+        "policy_effects": metrics_data["policy_effects"],
+    }
+
+
+def compact_hook_output(data: dict[str, Any]) -> dict[str, Any]:
+    if "error" in data:
+        return {"error": data["error"][:500], "returncode": data.get("returncode")}
+    context = data.get("hookSpecificOutput", {}).get("additionalContext")
+    return {"injected": bool(context), "context_chars": len(context or "")}
+
+
+def _memory(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    for key in ("evidence_json", "review_json", "kg_triple_ids_json", "review_feedback_json", "triggers_json"):
+        try:
+            data[key] = json.loads(data[key])
+        except (TypeError, json.JSONDecodeError):
+            data[key] = None
+    return data
+
+
+def _policy(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["matcher_json"] = json.loads(data["matcher_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["matcher_json"] = {}
+    return data
+
+
+def _recall(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    for key in ("route_json", "memory_ids_json", "outcome_json"):
+        try:
+            data[key] = json.loads(data[key])
+        except (TypeError, json.JSONDecodeError):
+            data[key] = [] if key == "memory_ids_json" else {}
+    return data
+
+
+def iso_now(value: float) -> str:
+    return datetime.fromtimestamp(value, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

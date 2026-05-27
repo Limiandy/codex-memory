@@ -1,0 +1,27 @@
+{
+  "name": "codex-memory",
+  "version": "0.1.1",
+  "description": "Long-term memory for Codex backed by MemPalace and GPT-5.4-Mini review.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Memory",
+    "shortDescription": "Reviewed long-term memory for Codex.",
+    "longDescription": "Codex Memory captures useful conversation and tool context, evaluates it with GPT-5.4-Mini, reviews it through deterministic quality gates, and stores approved memories in MemPalace.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Memory",
+      "MCP",
+      "Hooks"
+    ],
+    "defaultPrompt": [
+      "Search my Codex memory.",
+      "Review the current memory queue.",
+      "Forget a mistaken memory."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}
