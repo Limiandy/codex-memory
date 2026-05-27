@@ -23,17 +23,69 @@ The local SQLite Ledger is the only runtime store and source of truth.
 
 Set `CODEX_MEMORY_MODEL` to override the default model. The default is `gpt-5.4-mini`.
 
+## Install
+
+Install from a local checkout:
+
+```bash
+git clone https://github.com/Limiandy/codex-memory.git ~/plugins/codex-memory
+cd ~/plugins/codex-memory
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+./scripts/codex-memory plugin install --source "$PWD"
+./scripts/codex-memory doctor
+```
+
+The installer copies the plugin to `~/plugins/codex-memory`, registers it in `~/.agents/plugins/marketplace.json`, and enables it in `~/.codex/config.toml`. Existing Codex config is backed up before writing.
+
+## Verify
+
+Run doctor after install:
+
+```bash
+./scripts/codex-memory doctor
+```
+
+Doctor returns JSON with `fatal`, `warn`, and `info` checks. `fatal` failures block the core local memory path. `warn` items need attention but do not block startup. `info` items are optional or skipped checks, such as the default model smoke test.
+
+Run a model smoke test only when you want to verify the local `codex exec` model path:
+
+```bash
+./scripts/codex-memory doctor --model-check
+```
+
+Check that hooks and MCP are wired:
+
+```bash
+./scripts/codex-memory status
+./scripts/codex-memory ingest "默认使用中文回答"
+./scripts/codex-memory search "中文回答"
+```
+
+## Uninstall
+
+Disable the plugin but keep files:
+
+```bash
+./scripts/codex-memory plugin uninstall
+```
+
+Remove the installed plugin files too:
+
+```bash
+./scripts/codex-memory plugin uninstall --delete-files
+```
+
+To remove local memory data, stop active Codex sessions using the plugin and delete the state directory:
+
+```bash
+rm -rf ~/.codex-memory
+```
+
 ## Privacy
 
 Codex Memory stores events in `~/.codex-memory/ledger.sqlite3`. By default, event payloads are sanitized before storage: allowed fields are retained, long strings are truncated, and secret-like values are redacted. Stored event payloads include `_raw_payload_stored: false`.
 
 Reviewed memory content and evidence can still be stored when they pass review gates. Use `./scripts/codex-memory queue`, `promote`, `reject`, and `delete` to inspect and manage memory records.
-
-To clear all local state, stop active Codex sessions that use this plugin and remove the local state directory:
-
-```bash
-rm -rf ~/.codex-memory
-```
 
 Raw event storage is opt-in and should only be used for local debugging:
 
@@ -41,7 +93,7 @@ Raw event storage is opt-in and should only be used for local debugging:
 CODEX_MEMORY_STORE_RAW_EVENTS=1 ./scripts/codex-memory ingest "debug text"
 ```
 
-When raw event storage is enabled, original event payloads are written to the local Ledger with `_raw_payload_stored: true`.
+When raw event storage is enabled, original event payloads are written to the local Ledger with `_raw_payload_stored: true`. `status` and `doctor` report that raw event storage is enabled.
 
 ## Experimental CLI
 

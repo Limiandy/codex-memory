@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,3 +78,33 @@ class SecurityTest(unittest.TestCase):
                 self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", log_text)
             finally:
                 os.environ.pop("CODEX_MEMORY_LOG_DIR", None)
+
+    def test_hook_received_log_uses_payload_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                **os.environ,
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_FAKE_MODEL": "1",
+                "CODEX_MEMORY_STATE_DIR": str(Path(tmp) / "state"),
+                "CODEX_MEMORY_LOG_DIR": str(Path(tmp) / "logs"),
+            }
+            payload = {
+                "hook_event_name": "PreCompact",
+                "prompt": "token=supersecretvalue1234567890",
+                "customer": "private customer",
+            }
+            proc = subprocess.run(
+                [sys.executable, "-m", "codex_memory.hooks", "precompact"],
+                cwd=".",
+                env=env,
+                input=json.dumps(payload, ensure_ascii=False),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            log_text = (Path(tmp) / "logs" / "debug.jsonl").read_text(encoding="utf-8")
+            self.assertIn("payload_summary", log_text)
+            self.assertNotIn("supersecretvalue1234567890", log_text)
+            self.assertNotIn("private customer", log_text)

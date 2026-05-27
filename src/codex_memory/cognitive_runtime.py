@@ -6,6 +6,7 @@ from typing import Any
 from .ontology import cognitive_layer_for_memory, ontology_snapshot
 from .recall import MemoryRecall
 from .reasoning_policy import ReasoningPolicyEngine
+from .security import summarize_payload
 from .state_machine import RuntimeStateMachine
 from .taxonomy import classify, near_duplicate_text, tokenize
 from .workflow_dag import WorkflowDAG, WorkflowExecutor, WorkflowStep, build_dag
@@ -20,14 +21,15 @@ class CognitiveRuntime:
     def begin_event(self, event_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self.transition("event", event_id, "received", event_id=event_id, metadata={"event_type": event_type})
         self.transition("event", event_id, "processing", event_id=event_id, metadata={"event_type": event_type})
+        payload_summary = summarize_payload(payload)
         self.ledger.record_cognitive_record(
             "audit",
             "event",
             event_id,
-            f"{event_type}: {str(payload)[:500]}",
+            f"{event_type}: payload_summary={payload_summary}",
             "active",
             "session",
-            metadata={"event_type": event_type, "payload_keys": sorted(payload.keys())},
+            metadata={"event_type": event_type, "payload_summary": payload_summary},
             source_kind="event",
         )
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import load_config
 from . import logger
+from .security import summarize_payload
 from .service import MemoryService
 
 
@@ -20,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     except (json.JSONDecodeError, EOFError):
         payload = {}
 
-    logger.info("hook received", hook=hook_name, payload=payload)
+    logger.info("hook received", hook=hook_name, payload_summary=summarize_payload(payload))
     service = MemoryService(load_config())
     try:
         if hook_name == "session_start":
@@ -69,7 +70,7 @@ def _session_start(service: MemoryService, payload: dict[str, Any]) -> int:
 
 def _user_message(service: MemoryService, payload: dict[str, Any]) -> int:
     event_id = service.record_event("user_message", payload)
-    logger.debug("user_message event recorded", event_id=event_id, prompt=payload.get("prompt"))
+    logger.debug("user_message event recorded", event_id=event_id, payload_summary=summarize_payload(payload))
     _spawn_worker(event_id)
     context = service.prompt_context(
         str(payload.get("prompt", "")),

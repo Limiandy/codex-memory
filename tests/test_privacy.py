@@ -58,6 +58,30 @@ class PrivacyTest(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_cognitive_audit_uses_payload_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MemoryService(_config(tmp))
+            try:
+                service.process_event(
+                    "evt_privacy",
+                    "manual",
+                    {
+                        "text": "token=supersecretvalue1234567890",
+                        "api_key": "sk-secretsecretsecret",
+                        "customer": "private customer",
+                    },
+                )
+                records = service.ledger.list_cognitive_records(layer="audit", limit=10)
+                event_records = [item for item in records if item.get("source_id") == "evt_privacy"]
+                self.assertTrue(event_records)
+                rendered = str(event_records[0])
+                self.assertIn("payload_summary", rendered)
+                self.assertNotIn("supersecretvalue1234567890", rendered)
+                self.assertNotIn("sk-secretsecretsecret", rendered)
+                self.assertNotIn("private customer", rendered)
+            finally:
+                service.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,13 +38,25 @@ class DoctorTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             result = json.loads(proc.stdout)
             self.assertIn("checks", result)
+            self.assertIn("summary", result)
             self.assertIn("sqlite_ledger", result["checks"])
+            self.assertEqual(result["checks"]["sqlite_ledger"]["level"], "fatal")
 
     def test_doctor_checks_sqlite_and_mcp(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_doctor(_config(tmp))
             self.assertTrue(result["checks"]["sqlite_ledger"]["ok"])
             self.assertTrue(result["checks"]["mcp_server"]["ok"])
+            self.assertEqual(result["checks"]["model_smoke"]["level"], "info")
+
+    def test_raw_event_storage_is_warn_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(tmp)
+            config = Config(**{**config.__dict__, "store_raw_events": True})
+            result = run_doctor(config)
+            self.assertFalse(result["checks"]["raw_event_storage"]["ok"])
+            self.assertEqual(result["checks"]["raw_event_storage"]["level"], "warn")
+            self.assertEqual(result["summary"]["warn_failed"], 1)
 
     def test_portable_config_detects_absolute_user_paths(self):
         self.assertFalse(config_text_is_portable('{"command": "/Users/limengkai/plugins/codex-memory/script"}'))

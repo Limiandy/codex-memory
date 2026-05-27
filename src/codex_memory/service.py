@@ -279,6 +279,7 @@ class MemoryService:
             "store": self.store.status(),
             "model": self.config.model,
             "primary_store": self.config.primary_store,
+            "privacy": _privacy_status(self.config),
             "cognitive": self.runtime.snapshot()["records"],
         }
 
@@ -286,6 +287,7 @@ class MemoryService:
         return {
             "ledger": self.ledger.stats(),
             "model": self.config.model,
+            "privacy": _privacy_status(self.config),
         }
 
     def list_memories(self, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -354,3 +356,10 @@ def _repo_root():
     from pathlib import Path
 
     return Path(__file__).resolve().parents[2]
+
+
+def _privacy_status(config: Config) -> dict[str, Any]:
+    status = {"store_raw_events": config.store_raw_events}
+    if config.store_raw_events:
+        status["warning"] = "raw event payload storage is enabled"
+    return status

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +22,17 @@ def run_doctor(config: Config, model_check: bool = False) -> dict[str, Any]:
         "state_dir": _check_state_dir(config),
         "sqlite_ledger": _check_sqlite_ledger(config),
         "codex_cli": _check_codex_cli(),
+        "raw_event_storage": _check_raw_event_storage(config),
         "mcp_config_portable": _check_config_portable(root / ".mcp.json"),
         "hooks_config": _check_hooks_config(root / "hooks.json"),
         "mcp_server": _check_mcp_server(config),
         "model_smoke": _check_model(config) if model_check else _skipped("pass --model-check to run a model smoke test"),
     }
-    return {"ok": all(item.get("ok") is not False for item in checks.values()), "checks": checks}
+    return {
+        "ok": all(item.get("ok") is not False for item in checks.values() if item.get("level") == "fatal"),
+        "summary": _summary(checks),
+        "checks": checks,
+    }
 
 
 def plugin_root() -> Path:
@@ -42,19 +48,22 @@ def config_text_is_portable(text: str) -> bool:
 
 def _check_plugin_root(root: Path) -> dict[str, Any]:
     manifest = root / ".codex-plugin" / "plugin.json"
-    return {"ok": root.is_dir() and manifest.is_file(), "path": str(root), "manifest": str(manifest)}
+    return _result("fatal", root.is_dir() and manifest.is_file(), path=str(root), manifest=str(manifest))
 
 
 def _check_state_dir(config: Config) -> dict[str, Any]:
     try:
         ensure_state_dir(config)
-        probe = config.state_dir / ".doctor-write-test"
+        probe = config.state_dir / f".doctor-write-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
+        try:
+            probe.unlink()
+        except OSError:
+            pass
         mode = oct(config.state_dir.stat().st_mode & 0o777)
-        return {"ok": True, "path": str(config.state_dir), "mode": mode}
+        return _result("fatal", True, path=str(config.state_dir), mode=mode)
     except OSError as exc:
-        return {"ok": False, "path": str(config.state_dir), "error": str(exc)}
+        return _result("fatal", False, path=str(config.state_dir), error=str(exc))
 
 
 def _check_sqlite_ledger(config: Config) -> dict[str, Any]:
@@ -64,38 +73,45 @@ def _check_sqlite_ledger(config: Config) -> dict[str, Any]:
             stats = ledger.stats()
         finally:
             ledger.close()
-        return {"ok": True, "path": str(config.ledger_path), "stats": stats}
+        return _result("fatal", True, path=str(config.ledger_path), stats=stats)
     except Exception as exc:
-        return {"ok": False, "path": str(config.ledger_path), "error": str(exc)}
+        return _result("fatal", False, path=str(config.ledger_path), error=str(exc))
 
 
 def _check_codex_cli() -> dict[str, Any]:
     path = shutil.which("codex")
-    return {"ok": bool(path), "path": path}
+    return _result("fatal", bool(path), path=path, impact="required for model-backed memory extraction")
+
+
+def _check_raw_event_storage(config: Config) -> dict[str, Any]:
+    if config.store_raw_events:
+        return _result("warn", False, enabled=True, impact="raw event payloads are stored in the local Ledger")
+    return _result("info", True, enabled=False)
 
 
 def _check_config_portable(path: Path) -> dict[str, Any]:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return {"ok": False, "path": str(path), "error": str(exc)}
-    return {"ok": config_text_is_portable(text), "path": str(path)}
+        return _result("fatal", False, path=str(path), error=str(exc))
+    return _result("fatal", config_text_is_portable(text), path=str(path))
 
 
 def _check_hooks_config(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return {"ok": False, "path": str(path), "error": str(exc)}
+        return _result("fatal", False, path=str(path), error=str(exc))
     hooks = data.get("hooks") if isinstance(data, dict) else {}
     required = {"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "PreCompact"}
     present = set(hooks or {})
     text = path.read_text(encoding="utf-8")
-    return {
-        "ok": required.issubset(present) and config_text_is_portable(text),
-        "path": str(path),
-        "missing": sorted(required - present),
-    }
+    return _result(
+        "fatal",
+        required.issubset(present) and config_text_is_portable(text),
+        path=str(path),
+        missing=sorted(required - present),
+    )
 
 
 def _check_mcp_server(config: Config) -> dict[str, Any]:
@@ -120,9 +136,9 @@ def _check_mcp_server(config: Config) -> dict[str, Any]:
         second = _read_json_line(proc)
         names = [tool.get("name") for tool in second.get("result", {}).get("tools", [])]
         ok = first.get("result", {}).get("serverInfo", {}).get("name") == "codex-memory" and "codex_memory_search" in names
-        return {"ok": ok, "tool_count": len(names)}
+        return _result("fatal", ok, tool_count=len(names))
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return _result("fatal", False, error=str(exc))
     finally:
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             if stream is not None:
@@ -144,9 +160,9 @@ def _check_model(config: Config) -> dict[str, Any]:
             "Return {\"ok\": true} as JSON.",
             {"ok": "boolean"},
         )
-        return {"ok": bool(result), "result_keys": sorted(result.keys())}
+        return _result("fatal", bool(result), result_keys=sorted(result.keys()))
     except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+        return _result("fatal", False, error=str(exc))
 
 
 def _read_json_line(proc: subprocess.Popen[str]) -> dict[str, Any]:
@@ -159,4 +175,20 @@ def _read_json_line(proc: subprocess.Popen[str]) -> dict[str, Any]:
 
 
 def _skipped(reason: str) -> dict[str, Any]:
-    return {"ok": None, "skipped": True, "reason": reason}
+    return _result("info", None, skipped=True, reason=reason)
+
+
+def _result(level: str, ok: bool | None, **fields: Any) -> dict[str, Any]:
+    return {"level": level, "ok": ok, **fields}
+
+
+def _summary(checks: dict[str, dict[str, Any]]) -> dict[str, int]:
+    summary = {"fatal_failed": 0, "warn_failed": 0, "skipped": 0}
+    for check in checks.values():
+        if check.get("ok") is False and check.get("level") == "fatal":
+            summary["fatal_failed"] += 1
+        if check.get("ok") is False and check.get("level") == "warn":
+            summary["warn_failed"] += 1
+        if check.get("skipped"):
+            summary["skipped"] += 1
+    return summary
