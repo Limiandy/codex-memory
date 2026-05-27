@@ -70,11 +70,6 @@ class Ledger:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
-            CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
-            CREATE INDEX IF NOT EXISTS idx_memories_content ON memories(content);
-            CREATE INDEX IF NOT EXISTS idx_memories_scope_project ON memories(status, scope, project_key);
-
             CREATE TABLE IF NOT EXISTS recall_events (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
@@ -88,7 +83,6 @@ class Ledger:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_recall_events_turn ON recall_events(session_id, turn_id);
 
             CREATE TABLE IF NOT EXISTS memory_edges (
                 id TEXT PRIMARY KEY,
@@ -101,8 +95,6 @@ class Ledger:
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_id, target_id, relation)
             );
-            CREATE INDEX IF NOT EXISTS idx_memory_edges_source ON memory_edges(source_id);
-            CREATE INDEX IF NOT EXISTS idx_memory_edges_target ON memory_edges(target_id);
 
             CREATE TABLE IF NOT EXISTS governance_reports (
                 id TEXT PRIMARY KEY,
@@ -126,7 +118,6 @@ class Ledger:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_governance_policies_type ON governance_policies(policy_type, active);
 
             CREATE TABLE IF NOT EXISTS governance_state (
                 key TEXT PRIMARY KEY,
@@ -165,8 +156,6 @@ class Ledger:
                 updated_at TEXT NOT NULL,
                 UNIQUE(layer, record_type, source_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_cognitive_records_layer ON cognitive_records(layer,status);
-            CREATE INDEX IF NOT EXISTS idx_cognitive_records_scope ON cognitive_records(scope,project_key,session_id);
 
             CREATE TABLE IF NOT EXISTS cognitive_edges (
                 id TEXT PRIMARY KEY,
@@ -179,8 +168,6 @@ class Ledger:
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_id,target_id,relation)
             );
-            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_source ON cognitive_edges(source_id);
-            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_target ON cognitive_edges(target_id);
 
             CREATE TABLE IF NOT EXISTS runtime_state_transitions (
                 id TEXT PRIMARY KEY,
@@ -192,7 +179,6 @@ class Ledger:
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_runtime_state_subject ON runtime_state_transitions(subject_type,subject_id,created_at);
 
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -204,6 +190,9 @@ class Ledger:
         self._record_schema_baseline()
         self._ensure_event_columns()
         self._ensure_memory_columns()
+        self._ensure_recall_event_columns()
+        self._ensure_cognitive_record_columns()
+        self._ensure_indexes()
         self._commit()
 
     @contextmanager
@@ -292,6 +281,71 @@ class Ledger:
             added_processing_columns = True
         if added_processing_columns:
             self.conn.execute("UPDATE events SET processed_at=created_at WHERE processed_at IS NULL")
+
+    def _ensure_recall_event_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(recall_events)").fetchall()}
+        if not columns:
+            return
+        if "cwd" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN cwd TEXT")
+        if "project_key" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN project_key TEXT")
+        if "session_id" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN session_id TEXT")
+        if "turn_id" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN turn_id TEXT")
+        if "outcome_json" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN outcome_json TEXT NOT NULL DEFAULT '{}'")
+        if "updated_at" not in columns:
+            self.conn.execute("ALTER TABLE recall_events ADD COLUMN updated_at TEXT")
+            self.conn.execute("UPDATE recall_events SET updated_at=created_at WHERE updated_at IS NULL")
+
+    def _ensure_cognitive_record_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(cognitive_records)").fetchall()}
+        if not columns:
+            return
+        if "source_kind" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN source_kind TEXT")
+        if "domain" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN domain TEXT")
+        if "category" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN category TEXT")
+        if "subcategory" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN subcategory TEXT")
+        if "confidence" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN confidence REAL NOT NULL DEFAULT 0")
+        if "importance" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN importance REAL NOT NULL DEFAULT 0")
+        if "strength" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN strength REAL NOT NULL DEFAULT 1")
+        if "project_key" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN project_key TEXT")
+        if "session_id" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN session_id TEXT")
+        if "metadata_json" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+        if "updated_at" not in columns:
+            self.conn.execute("ALTER TABLE cognitive_records ADD COLUMN updated_at TEXT")
+            self.conn.execute("UPDATE cognitive_records SET updated_at=created_at WHERE updated_at IS NULL")
+
+    def _ensure_indexes(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+            CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
+            CREATE INDEX IF NOT EXISTS idx_memories_content ON memories(content);
+            CREATE INDEX IF NOT EXISTS idx_memories_scope_project ON memories(status, scope, project_key);
+            CREATE INDEX IF NOT EXISTS idx_recall_events_turn ON recall_events(session_id, turn_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_edges_source ON memory_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_edges_target ON memory_edges(target_id);
+            CREATE INDEX IF NOT EXISTS idx_governance_policies_type ON governance_policies(policy_type, active);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_records_layer ON cognitive_records(layer,status);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_records_scope ON cognitive_records(scope,project_key,session_id);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_source ON cognitive_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_target ON cognitive_edges(target_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_state_subject ON runtime_state_transitions(subject_type,subject_id,created_at);
+            """
+        )
 
     def add_event(self, event_type: str, payload: dict[str, Any]) -> str:
         event_id = _id("evt")
@@ -1194,6 +1248,9 @@ class Ledger:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
+    legacy_drawer_key = "mem" + "palace_drawer_id"
+    for legacy_key in ("wing", "room", legacy_drawer_key, "kg_triple_ids_json"):
+        data.pop(legacy_key, None)
     for key in ("evidence_json", "review_json", "review_feedback_json", "triggers_json"):
         try:
             data[key] = json.loads(data[key])

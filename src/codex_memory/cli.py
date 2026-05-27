@@ -6,8 +6,28 @@ import sys
 from pathlib import Path
 
 from .config import load_config
+from .doctor import run_doctor
 from . import plugin_manager
 from .service import MemoryService
+
+
+EXPERIMENTAL_COMMANDS = {
+    "cognitive-snapshot",
+    "knowledge-build",
+    "knowledge-search",
+    "knowledge-audit",
+    "skill-build",
+    "skill-list",
+    "skill-audit",
+    "skill-promote",
+    "skill-deprecate",
+    "workflow-plan",
+    "workflow-execute",
+    "workflow-resume",
+    "workflow-cancel",
+    "workflow-audit",
+    "govern-cognitive",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--model-check", action="store_true")
 
     ingest = sub.add_parser("ingest")
     ingest.add_argument("text")
@@ -102,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     uninstall.add_argument("--delete-files", action="store_true")
 
     args = parser.parse_args(argv)
+    config = load_config()
     if args.cmd == "plugin":
         if args.plugin_cmd == "install":
             return _print(plugin_manager.install(Path(args.source)))
@@ -115,8 +138,19 @@ def main(argv: list[str] | None = None) -> int:
             return _print(plugin_manager.block())
         if args.plugin_cmd == "uninstall":
             return _print(plugin_manager.uninstall(delete_files=args.delete_files))
+    if args.cmd == "doctor":
+        return _print(run_doctor(config, model_check=args.model_check))
+    if args.cmd in EXPERIMENTAL_COMMANDS and not config.enable_experimental_cli:
+        return _print_error(
+            {
+                "error": "experimental_cli_disabled",
+                "command": args.cmd,
+                "hint": "Set CODEX_MEMORY_ENABLE_EXPERIMENTAL_CLI=1 to enable experimental commands.",
+            },
+            code=2,
+        )
 
-    service = MemoryService(load_config())
+    service = MemoryService(config)
     try:
         if args.cmd == "status":
             return _print(service.status())
@@ -190,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
 def _print(data) -> int:
     sys.stdout.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return 0
+
+
+def _print_error(data, code: int) -> int:
+    sys.stderr.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return code
 
 
 if __name__ == "__main__":

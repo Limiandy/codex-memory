@@ -15,7 +15,7 @@ from .local_store import LocalCognitiveStore
 from .model_client import CodexMiniClient
 from .recall import MemoryRecall
 from .review import MemoryReviewer
-from .security import summarize_payload, summarize_candidate
+from .security import sanitize_payload, summarize_payload, summarize_candidate
 from .skills import SkillEngine
 
 
@@ -34,7 +34,7 @@ class MemoryService:
         self.ledger.close()
 
     def ingest_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-        event_id = self.ledger.add_event(event_type, payload)
+        event_id = self.ledger.add_event(event_type, self._stored_event_payload(payload))
         logger.info("ingest event created", event_id=event_id, event_type=event_type, payload_summary=summarize_payload(payload))
         return self.process_event(event_id, event_type, payload)
 
@@ -163,11 +163,18 @@ class MemoryService:
         return {"audit_events_processed": self.ledger.reconcile_audit_events(), "stats": self.ledger.stats()}
 
     def record_event(self, event_type: str, payload: dict[str, Any], processed: bool = False) -> str:
-        event_id = self.ledger.add_event(event_type, payload)
+        event_id = self.ledger.add_event(event_type, self._stored_event_payload(payload))
         if processed:
             self.ledger.mark_event_processed(event_id)
         logger.debug("event recorded", event_id=event_id, event_type=event_type, processed=processed, payload_summary=summarize_payload(payload))
         return event_id
+
+    def _stored_event_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.config.store_raw_events:
+            return {**payload, "_raw_payload_stored": True}
+        sanitized = sanitize_payload(payload)
+        sanitized["_raw_payload_stored"] = False
+        return sanitized
 
     def prompt_context(
         self,

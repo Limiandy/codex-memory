@@ -1,7 +1,7 @@
 {
   "name": "codex-memory",
   "version": "0.1.1",
-  "description": "Long-term memory for Codex backed by MemPalace and GPT-5.4-Mini review.",
+  "description": "Ledger-only local long-term memory for Codex with GPT-5.4-Mini review.",
   "author": {
     "name": "Local developer"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Codex Memory",
     "shortDescription": "Reviewed long-term memory for Codex.",
-    "longDescription": "Codex Memory captures useful conversation and tool context, evaluates it with GPT-5.4-Mini, reviews it through deterministic quality gates, and stores approved memories in MemPalace.",
+    "longDescription": "Codex Memory captures useful conversation and tool context, evaluates it with GPT-5.4-Mini, reviews it through deterministic quality gates, and stores reviewed memories in a local SQLite Ledger.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [

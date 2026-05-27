@@ -20,6 +20,8 @@ class Config:
     max_evidence_quote_chars: int
     primary_store: str = "ledger"
     enable_dangerous_mcp_tools: bool = False
+    store_raw_events: bool = False
+    enable_experimental_cli: bool = False
 
 
 def _default_state_dir() -> Path:
@@ -42,6 +44,14 @@ def load_config() -> Config:
         os.environ.get("CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS"),
         bool(data.get("enable_dangerous_mcp_tools", False)),
     )
+    store_raw_events = _bool(
+        os.environ.get("CODEX_MEMORY_STORE_RAW_EVENTS"),
+        bool(data.get("store_raw_events", False)),
+    )
+    enable_experimental_cli = _bool(
+        os.environ.get("CODEX_MEMORY_ENABLE_EXPERIMENTAL_CLI"),
+        bool(data.get("enable_experimental_cli", False)),
+    )
 
     return Config(
         model=str(model),
@@ -53,6 +63,8 @@ def load_config() -> Config:
         max_evidence_quote_chars=int(data.get("max_evidence_quote_chars", 500)),
         primary_store="ledger",
         enable_dangerous_mcp_tools=enable_dangerous_mcp_tools,
+        store_raw_events=store_raw_events,
+        enable_experimental_cli=enable_experimental_cli,
     )
 
 

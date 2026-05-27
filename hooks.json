@@ -11,6 +11,28 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/hooks/codex-memory-hook.sh\" user_message'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/hooks/codex-memory-hook.sh\" after_tool_call'"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": ".*",
