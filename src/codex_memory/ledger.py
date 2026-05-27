@@ -144,6 +144,57 @@ class Ledger:
                 processed_at TEXT,
                 process_error TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS cognitive_records (
+                id TEXT PRIMARY KEY,
+                layer TEXT NOT NULL,
+                record_type TEXT NOT NULL,
+                source_id TEXT,
+                source_kind TEXT,
+                status TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                content TEXT NOT NULL,
+                domain TEXT,
+                category TEXT,
+                subcategory TEXT,
+                confidence REAL NOT NULL DEFAULT 0,
+                importance REAL NOT NULL DEFAULT 0,
+                strength REAL NOT NULL DEFAULT 1,
+                project_key TEXT,
+                session_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(layer, record_type, source_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cognitive_records_layer ON cognitive_records(layer,status);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_records_scope ON cognitive_records(scope,project_key,session_id);
+
+            CREATE TABLE IF NOT EXISTS cognitive_edges (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                weight REAL NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source_id,target_id,relation)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_source ON cognitive_edges(source_id);
+            CREATE INDEX IF NOT EXISTS idx_cognitive_edges_target ON cognitive_edges(target_id);
+
+            CREATE TABLE IF NOT EXISTS runtime_state_transitions (
+                id TEXT PRIMARY KEY,
+                subject_type TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                previous_state TEXT,
+                event_id TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_runtime_state_subject ON runtime_state_transitions(subject_type,subject_id,created_at);
             """
         )
         self._ensure_event_columns()
@@ -220,6 +271,185 @@ class Ledger:
         )
         self.conn.commit()
         return event_id
+
+    def record_cognitive_record(
+        self,
+        layer: str,
+        record_type: str,
+        source_id: str | None,
+        content: str,
+        status: str,
+        scope: str,
+        domain: str | None = None,
+        category: str | None = None,
+        subcategory: str | None = None,
+        confidence: float = 0.0,
+        importance: float = 0.0,
+        strength: float = 1.0,
+        project_key: str | None = None,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_kind: str | None = None,
+    ) -> dict[str, Any]:
+        record_id = source_id if source_id and layer in {"memory", "knowledge", "skill", "runtime_state", "audit"} else _id("cog")
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO cognitive_records(
+                id,layer,record_type,source_id,source_kind,status,scope,content,
+                domain,category,subcategory,confidence,importance,strength,
+                project_key,session_id,metadata_json,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(layer,record_type,source_id)
+            DO UPDATE SET
+                status=excluded.status,
+                scope=excluded.scope,
+                content=excluded.content,
+                domain=excluded.domain,
+                category=excluded.category,
+                subcategory=excluded.subcategory,
+                confidence=excluded.confidence,
+                importance=excluded.importance,
+                strength=excluded.strength,
+                project_key=excluded.project_key,
+                session_id=excluded.session_id,
+                metadata_json=excluded.metadata_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                record_id,
+                layer,
+                record_type,
+                source_id,
+                source_kind,
+                status,
+                scope,
+                content,
+                domain,
+                category,
+                subcategory,
+                max(0.0, min(1.0, float(confidence))),
+                max(0.0, min(1.0, float(importance))),
+                max(0.1, min(3.0, float(strength))),
+                project_key,
+                session_id,
+                json.dumps(metadata or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            """
+            SELECT * FROM cognitive_records
+            WHERE layer=? AND record_type=? AND source_id IS ?
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (layer, record_type, source_id),
+        ).fetchone()
+        return _cognitive_record_row_to_dict(row) if row else {}
+
+    def upsert_cognitive_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        relation: str,
+        weight: float,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO cognitive_edges(id,source_id,target_id,relation,weight,evidence_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_id,target_id,relation)
+            DO UPDATE SET weight=max(cognitive_edges.weight, excluded.weight),
+                          evidence_json=excluded.evidence_json,
+                          updated_at=excluded.updated_at
+            """,
+            (
+                _id("cedge"),
+                source_id,
+                target_id,
+                relation,
+                max(0.0, min(1.0, float(weight))),
+                json.dumps(evidence or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+    def list_cognitive_edges(self, relation: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 5000))
+        if relation:
+            rows = self.conn.execute(
+                "SELECT * FROM cognitive_edges WHERE relation=? ORDER BY weight DESC, updated_at DESC LIMIT ?",
+                (relation, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM cognitive_edges ORDER BY weight DESC, updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [_cognitive_edge_row_to_dict(row) for row in rows]
+
+    def list_cognitive_records(
+        self,
+        layer: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(limit, 5000))
+        where = []
+        params: list[Any] = []
+        if layer:
+            where.append("layer=?")
+            params.append(layer)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        sql = "SELECT * FROM cognitive_records"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY importance DESC, strength DESC, updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_cognitive_record_row_to_dict(row) for row in rows]
+
+    def record_state_transition(
+        self,
+        subject_type: str,
+        subject_id: str,
+        state: str,
+        previous_state: str | None = None,
+        event_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        transition_id = _id("state")
+        self.conn.execute(
+            """
+            INSERT INTO runtime_state_transitions(
+                id,subject_type,subject_id,state,previous_state,event_id,metadata_json,created_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                transition_id,
+                subject_type,
+                subject_id,
+                state,
+                previous_state,
+                event_id,
+                json.dumps(metadata or {}, ensure_ascii=False),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+        return transition_id
+
+    def latest_state_transitions(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM runtime_state_transitions ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
+        ).fetchall()
+        return [_state_row_to_dict(row) for row in rows]
 
     def get_event(self, event_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
@@ -918,6 +1148,33 @@ def _policy_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         data["matcher_json"] = json.loads(data["matcher_json"])
     except (TypeError, json.JSONDecodeError):
         data["matcher_json"] = {}
+    return data
+
+
+def _cognitive_record_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
+    return data
+
+
+def _cognitive_edge_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["evidence_json"] = json.loads(data["evidence_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["evidence_json"] = {}
+    return data
+
+
+def _state_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
     return data
 
 

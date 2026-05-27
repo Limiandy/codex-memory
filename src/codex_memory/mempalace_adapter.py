@@ -22,13 +22,13 @@ TYPE_TO_LOCATION = {
 class MemPalaceAdapter:
     def __init__(self, config: Config):
         self.config = config
-        self.disabled = bool(os.environ.get("CODEX_MEMORY_DISABLE_MEMPALACE"))
+        self.disabled = bool(os.environ.get("CODEX_MEMORY_DISABLE_MEMPALACE")) or not config.mirror_mempalace
         if config.palace_path:
             os.environ["MEMPALACE_PALACE_PATH"] = config.palace_path
 
     def status(self) -> dict[str, Any]:
         if self.disabled:
-            return {"disabled": True}
+            return {"disabled": True, "role": "optional_mirror", "primary_store": self.config.primary_store}
         try:
             from mempalace.mcp_server import tool_status
 

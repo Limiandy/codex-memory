@@ -30,6 +30,6 @@ class ServiceTest(unittest.TestCase):
                 memories = service.list_memories(limit=5)
                 self.assertTrue(memories)
                 self.assertEqual(memories[0]["status"], "active")
-                self.assertEqual(memories[0]["review_json"]["filing_skipped"], "mempalace_disabled")
+                self.assertEqual(memories[0]["review_json"]["filing_skipped"], "ledger_primary_mempalace_mirror_disabled")
             finally:
                 service.close()

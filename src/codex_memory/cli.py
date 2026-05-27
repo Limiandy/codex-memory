@@ -52,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reconcile")
     sub.add_parser("audit")
     sub.add_parser("consolidate")
+    sub.add_parser("cognitive-snapshot")
+    workflow = sub.add_parser("workflow-plan")
+    workflow.add_argument("prompt")
+    workflow.add_argument("--limit", type=int, default=6)
+    workflow.add_argument("--cwd", default=None)
+    workflow.add_argument("--session-id", default=None)
     govern = sub.add_parser("govern")
     govern.add_argument("--apply", action="store_true")
     periodic = sub.add_parser("govern-periodic")
@@ -109,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
             return _print(service.reconcile())
         if args.cmd == "consolidate":
             return _print(service.consolidate_memories())
+        if args.cmd == "cognitive-snapshot":
+            return _print(service.cognitive_snapshot())
+        if args.cmd == "workflow-plan":
+            return _print(service.workflow_plan(args.prompt, limit=args.limit, cwd=args.cwd, session_id=args.session_id))
         if args.cmd == "govern":
             return _print(service.govern_memories(apply=args.apply))
         if args.cmd == "govern-periodic":

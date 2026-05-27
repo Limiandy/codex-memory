@@ -4,10 +4,12 @@ from typing import Any
 
 from .consolidation import MemoryConsolidator
 from .config import Config, ensure_state_dir
+from .cognitive_runtime import CognitiveRuntime
 from .engine import MemoryEngine
 from .governance import MemoryGovernance
 from .ledger import Ledger, project_key_for_cwd
 from . import logger
+from .local_store import LocalCognitiveStore
 from .mempalace_adapter import MemPalaceAdapter
 from .model_client import CodexMiniClient
 from .recall import MemoryRecall
@@ -23,6 +25,8 @@ class MemoryService:
         self.engine = MemoryEngine(config, self.model)
         self.reviewer = MemoryReviewer(config, self.model)
         self.palace = MemPalaceAdapter(config)
+        self.runtime = CognitiveRuntime(self.ledger)
+        self.store = LocalCognitiveStore(self.ledger)
 
     def close(self) -> None:
         self.ledger.close()
@@ -43,6 +47,7 @@ class MemoryService:
 
     def process_event(self, event_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         logger.info("process event started", event_id=event_id, event_type=event_type, payload=payload)
+        self.runtime.begin_event(event_id, event_type, payload)
         if event_type == "user_message":
             feedback = self.apply_natural_feedback(
                 str(payload.get("prompt") or payload.get("text") or ""),
@@ -70,6 +75,7 @@ class MemoryService:
                     "duplicates": [{"id": item["id"], "content": item["content"]} for item in local_duplicates[:3]],
                 }
                 memory_id = self.ledger.add_candidate(candidate, "superseded", review, project_key=project_key, session_id=session_id)
+                self.runtime.sync_memory(memory_id)
                 self.ledger.add_review_feedback(str(local_duplicates[0]["id"]), "merge_duplicate", f"merged {memory_id}")
                 results.append(
                     {
@@ -120,9 +126,10 @@ class MemoryService:
             status = review["status"]
             logger.debug("review completed", event_id=event_id, candidate=candidate.to_dict(), review=review)
             memory_id = self.ledger.add_candidate(candidate, status, review, project_key=project_key, session_id=session_id)
+            self.runtime.sync_memory(memory_id)
             filed = {"drawer_id": None, "triple_ids": []}
             if status == "active":
-                filed = self.palace.file_candidate(candidate)
+                filed = self.palace.file_candidate(candidate) if self.config.mirror_mempalace else {"skipped": "ledger_primary_mempalace_mirror_disabled", "drawer_id": None, "triple_ids": []}
                 logger.debug("mempalace filing completed", event_id=event_id, memory_id=memory_id, filed=filed)
                 if filed.get("error"):
                     self.ledger.set_status(
@@ -131,14 +138,17 @@ class MemoryService:
                         {**review, "filing_error": filed["error"]},
                     )
                     status = "quarantined"
+                    self.runtime.sync_memory(memory_id)
                 elif filed.get("skipped"):
                     self.ledger.set_status(
                         memory_id,
                         "active",
                         {**review, "filing_skipped": filed["skipped"]},
                     )
+                    self.runtime.sync_memory(memory_id)
                 else:
                     self.ledger.mark_filed(memory_id, filed.get("drawer_id"), list(filed.get("triple_ids") or []))
+                    self.runtime.sync_memory(memory_id)
                 linked = self.ledger.link_related_active_memories(memory_id)
                 logger.debug("memory association edges updated", event_id=event_id, memory_id=memory_id, edge_updates=linked)
                 consolidated = self.consolidate_memories()
@@ -146,8 +156,10 @@ class MemoryService:
                     logger.info("memory consolidation completed", event_id=event_id, result=consolidated)
             results.append({"id": memory_id, "status": status, "candidate": candidate.to_dict(), "filed": filed})
         self.ledger.mark_event_processed(event_id)
+        result = {"event_id": event_id, "candidate_count": len(candidates), "results": results}
+        self.runtime.finish_event(event_id, result)
         logger.info("process event finished", event_id=event_id, candidate_count=len(candidates), results=results)
-        return {"event_id": event_id, "candidate_count": len(candidates), "results": results}
+        return result
 
     def promote_memory(self, memory_id: str, note: str = "", file_to_mempalace: bool = True) -> dict[str, Any]:
         memory = self.ledger.promote(memory_id, note)
@@ -224,10 +236,17 @@ class MemoryService:
         return self.ledger.register_recall_feedback(memory_id, outcome, note)
 
     def consolidate_memories(self) -> dict[str, Any]:
-        return MemoryConsolidator(self.ledger, self.model, self.reviewer).consolidate()
+        result = MemoryConsolidator(self.ledger, self.model, self.reviewer).consolidate()
+        for item in result.get("created") or []:
+            if item.get("id"):
+                self.runtime.sync_memory(str(item["id"]))
+        return result
 
     def govern_memories(self, apply: bool = False) -> dict[str, Any]:
         result = MemoryGovernance(self.ledger).evaluate(apply=apply)
+        if apply:
+            self.runtime.sync_all_active()
+            self.runtime.sync_governance_policies()
         logger.info("memory governance completed", apply=apply, result=result)
         return result
 
@@ -242,7 +261,14 @@ class MemoryService:
         return result
 
     def status(self) -> dict[str, Any]:
-        return {"ledger": self.ledger.stats(), "mempalace": self.palace.status(), "model": self.config.model}
+        return {
+            "store": self.store.status(),
+            "mempalace": self.palace.status(),
+            "model": self.config.model,
+            "primary_store": self.config.primary_store,
+            "mirror_mempalace": self.config.mirror_mempalace,
+            "cognitive": self.runtime.snapshot()["records"],
+        }
 
     def lightweight_status(self) -> dict[str, Any]:
         return {
@@ -253,6 +279,20 @@ class MemoryService:
 
     def list_memories(self, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         return self.ledger.list_memories(status=status, limit=limit)
+
+    def cognitive_snapshot(self) -> dict[str, Any]:
+        self.runtime.sync_all_active()
+        return self.runtime.snapshot()
+
+    def workflow_plan(
+        self,
+        prompt: str,
+        limit: int = 6,
+        cwd: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.runtime.sync_all_active()
+        return self.runtime.plan_workflow(prompt, limit=limit, cwd=cwd, session_id=session_id)
 
 def _candidate_from_memory(memory: dict[str, Any]):
     from .schema import Evidence, MemoryCandidate
