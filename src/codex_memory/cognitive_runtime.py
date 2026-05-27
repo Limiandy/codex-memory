@@ -640,20 +640,47 @@ class CognitiveRuntime:
             return
         succeeded = not bool(observation.get("test_failed"))
         for recipe_id in recipe_ids:
-            recipe = self.ledger.get_cognitive_record(recipe_id)
-            if not recipe:
+            match = self._match_recommended_recipe(recipe_id, command)
+            if not match:
                 continue
-            recipe_metadata = dict(recipe.get("metadata_json") or {})
-            commands = [str(item) for item in recipe_metadata.get("recipe") or [] if item]
-            if not any(_same_command(command, item) for item in commands):
-                continue
-            recipe_metadata["reuse_count"] = int(recipe_metadata.get("reuse_count") or 0) + 1
-            recipe_metadata["success_count"] = int(recipe_metadata.get("success_count") or 0) + (1 if succeeded else 0)
-            recipe_metadata["failure_count"] = int(recipe_metadata.get("failure_count") or 0) + (0 if succeeded else 1)
-            recipe_metadata["last_used_at"] = _utc_now()
-            recipe_metadata["last_reuse_workflow_id"] = workflow["id"]
-            recipe_metadata["last_reuse_command"] = command[:300]
-            self.ledger.adjust_cognitive_record_strength(str(recipe["id"]), 0.1 if succeeded else -0.2, recipe_metadata)
+            if succeeded:
+                self._update_recipe_success(match, workflow, observation)
+            else:
+                self._update_recipe_failure(match, workflow, observation)
+
+    def _match_recommended_recipe(self, recipe_id: str, command: str) -> dict[str, Any] | None:
+        recipe = self.ledger.get_cognitive_record(recipe_id)
+        if not recipe:
+            return None
+        metadata = dict(recipe.get("metadata_json") or {})
+        commands = [str(item) for item in metadata.get("recipe") or [] if item]
+        for recipe_command in commands:
+            if _same_command(command, recipe_command):
+                return {"recipe": recipe, "metadata": metadata, "matched_command": recipe_command}
+        return None
+
+    def _update_recipe_success(self, match: dict[str, Any], workflow: dict[str, Any], observation: dict[str, Any]) -> None:
+        metadata = self._recipe_reuse_metadata(match, workflow, observation)
+        metadata["success_count"] = int(metadata.get("success_count") or 0) + 1
+        self.ledger.adjust_cognitive_record_strength(str(match["recipe"]["id"]), 0.1, metadata)
+
+    def _update_recipe_failure(self, match: dict[str, Any], workflow: dict[str, Any], observation: dict[str, Any]) -> None:
+        metadata = self._recipe_reuse_metadata(match, workflow, observation)
+        metadata["failure_count"] = int(metadata.get("failure_count") or 0) + 1
+        self.ledger.adjust_cognitive_record_strength(str(match["recipe"]["id"]), -0.2, metadata)
+
+    def _recipe_reuse_metadata(self, match: dict[str, Any], workflow: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+        metadata = dict(match.get("metadata") or {})
+        summary = observation.get("summary") or {}
+        metadata["reuse_count"] = int(metadata.get("reuse_count") or 0) + 1
+        metadata["last_used_at"] = _utc_now()
+        metadata["last_reuse_workflow_id"] = workflow["id"]
+        metadata["last_reuse_command"] = str(observation.get("command") or "")[:300]
+        metadata["last_reuse_matched_command"] = str(match.get("matched_command") or "")[:300]
+        metadata["last_reuse_command_source"] = (summary.get("source_fields") or {}).get("command")
+        metadata["last_reuse_exit_code"] = summary.get("exit_code")
+        metadata["last_reuse_succeeded"] = not bool(observation.get("test_failed"))
+        return metadata
 
     def snapshot(self) -> dict[str, Any]:
         self.sync_governance_policies()

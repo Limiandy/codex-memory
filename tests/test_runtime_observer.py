@@ -272,6 +272,10 @@ class RuntimeObserverTest(unittest.TestCase):
                 self.assertEqual(metadata["success_count"], 2)
                 self.assertEqual(metadata["failure_count"], 0)
                 self.assertEqual(metadata["last_reuse_workflow_id"], second["workflow_id"])
+                self.assertEqual(metadata["last_reuse_matched_command"], "python3 -m unittest discover -s tests -v")
+                self.assertEqual(metadata["last_reuse_command_source"], "cmd")
+                self.assertEqual(metadata["last_reuse_exit_code"], 0)
+                self.assertTrue(metadata["last_reuse_succeeded"])
                 self.assertGreater(updated["strength"], initial_strength)
                 self.assertTrue(metadata["last_used_at"])
             finally:
@@ -298,7 +302,31 @@ class RuntimeObserverTest(unittest.TestCase):
                 self.assertEqual(metadata["reuse_count"], 1)
                 self.assertEqual(metadata["success_count"], 1)
                 self.assertEqual(metadata["failure_count"], 1)
+                self.assertFalse(metadata["last_reuse_succeeded"])
                 self.assertLess(updated["strength"], initial_strength)
+            finally:
+                service.close()
+
+    def test_similar_but_different_verification_command_does_not_count_as_recipe_reuse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            try:
+                service.start_task_from_prompt({"prompt": "修复测试失败", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.exec_command", "cmd": "rg failing_test tests", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.apply_patch", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.exec_command", "cmd": "python3 -m unittest discover -s tests -v", "stdout": "OK", "exit_code": 0, "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_stop({"session_id": "s1", "turn_id": "t1", "cwd": tmp, "last_assistant_message": "已完成，测试通过"})
+                recipe = [item for item in service.ledger.list_cognitive_records(layer="skill", status="active", limit=20) if item.get("record_type") == "verification_recipe"][0]
+
+                service.start_task_from_prompt({"prompt": "实现另一个功能", "session_id": "s1", "turn_id": "t2", "cwd": tmp})
+                service.prompt_context("继续", cwd=tmp, session_id="s1", turn_id="t2")
+                service.observe_tool_use({"tool_name": "functions.exec_command", "cmd": "python3 -m unittest tests.test_runtime_observer -v", "stdout": "OK", "exit_code": 0, "session_id": "s1", "turn_id": "t2", "cwd": tmp})
+
+                updated = service.ledger.get_cognitive_record(recipe["id"])
+                metadata = updated["metadata_json"]
+                self.assertEqual(metadata["reuse_count"], 0)
+                self.assertEqual(metadata["success_count"], 1)
+                self.assertEqual(metadata["failure_count"], 0)
             finally:
                 service.close()
 
