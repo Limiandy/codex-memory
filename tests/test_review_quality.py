@@ -14,7 +14,6 @@ def _reviewer(tmp):
         model="gpt-5.4-mini",
         state_dir=Path(tmp),
         ledger_path=Path(tmp) / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,

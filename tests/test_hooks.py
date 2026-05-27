@@ -14,7 +14,6 @@ class HookTest(unittest.TestCase):
                 **os.environ,
                 "PYTHONPATH": "src",
                 "CODEX_MEMORY_FAKE_MODEL": "1",
-                "CODEX_MEMORY_DISABLE_MEMPALACE": "1",
                 "CODEX_MEMORY_STATE_DIR": tmp,
             }
 

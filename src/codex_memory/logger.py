@@ -2,21 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .security import redact_secrets
+
 
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
-SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9_-]{12,}"),
-    re.compile(r"ghp_[A-Za-z0-9_]{12,}"),
-    re.compile(r"(?i)(token|secret|api[_-]?key|password)(['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+"),
-    re.compile(r"-----BEGIN [A-Z ]+PRIVATE KEY-----.*?-----END [A-Z ]+PRIVATE KEY-----", re.S),
-]
-
-
 def debug(message: str, **fields: Any) -> None:
     log("DEBUG", message, **fields)
 
@@ -56,32 +49,7 @@ def log(level: str, message: str, **fields: Any) -> None:
 
 
 def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted = {}
-        for key, item in value.items():
-            if _sensitive_key(str(key)):
-                redacted[key] = "[redacted]"
-            else:
-                redacted[key] = _redact(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact(item) for item in value]
-    if isinstance(value, str):
-        text = value
-        for pattern in SECRET_PATTERNS:
-            if pattern.pattern.startswith("(?i)"):
-                text = pattern.sub(r"\1\2[redacted]", text)
-            else:
-                text = pattern.sub("[redacted]", text)
-        return text
-    return value
-
-
-def _sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(part in lowered for part in ("token", "secret", "api_key", "apikey", "password"))
+    return redact_secrets(value)
 
 
 def _format_pretty(record: dict[str, Any]) -> str:

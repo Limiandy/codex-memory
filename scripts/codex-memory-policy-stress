@@ -37,7 +37,6 @@ def main() -> int:
     args = parser.parse_args()
 
     os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
-    os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
 
     state_dir = Path(args.state_dir) if args.state_dir else Path(tempfile.mkdtemp(prefix="codex-memory-policy-stress-", dir="/private/tmp"))
     service = _service(state_dir)
@@ -106,7 +105,6 @@ def _service(state_dir: Path) -> MemoryService:
         model="gpt-5.4-mini",
         state_dir=state_dir,
         ledger_path=state_dir / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,

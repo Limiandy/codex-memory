@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "codex-memory": {
-      "command": "/Users/limengkai/plugins/codex-memory/scripts/codex-memory-mcp",
-      "args": []
+      "command": "bash",
+      "args": [
+        "-lc",
+        "CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/scripts/codex-memory-mcp\""
+      ]
     }
   }
 }

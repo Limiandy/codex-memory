@@ -8,7 +8,7 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+|[\u4e00-\u9fff]{2,}")
 
 DOMAIN_KEYWORDS = {
     "memory_system": {
-        "记忆", "召回", "联想", "mempalace", "memory", "review", "hook", "hooks", "mcp", "codex-memory"
+        "记忆", "召回", "联想", "memory", "review", "hook", "hooks", "mcp", "codex-memory", "ledger"
     },
     "software_engineering": {
         "代码", "工程", "插件", "api", "python", "javascript", "typescript", "sqlite", "测试", "日志", "worker", "codex",
@@ -25,7 +25,7 @@ SUBCATEGORY_KEYWORDS = {
     "logging": {"日志", "log", "debug", "debugger", "pretty"},
     "review": {"review", "评审", "准入", "变傻", "质量"},
     "recall": {"召回", "联想", "检索", "注入", "上下文"},
-    "mempalace": {"mempalace", "palace", "数据库"},
+    "ledger": {"ledger", "sqlite", "数据库", "主存储"},
     "testing": {"测试", "模拟", "覆盖率", "验证", "simulation"},
     "frontend": {"前端", "vue", "react", "jquery", "组件", "状态管理", "路由", "构建", "vite", "webpack"},
     "project_type": {"管理平台", "后台", "门户", "官网", "小程序", "miniapp", "dashboard", "portal"},

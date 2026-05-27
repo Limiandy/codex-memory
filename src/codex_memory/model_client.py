@@ -10,6 +10,7 @@ from typing import Any
 from .config import Config
 from .jsonutil import extract_json_object
 from . import logger
+from .security import sanitize_model_result, redact_secrets
 
 
 class ModelError(RuntimeError):
@@ -23,11 +24,11 @@ class CodexMiniClient:
     def complete_json(self, prompt: str, schema_hint: dict[str, Any] | None = None) -> dict[str, Any]:
         if os.environ.get("CODEX_MEMORY_FAKE_MODEL"):
             result = self._fake_response(prompt)
-            logger.debug("model fake response", prompt=prompt, schema=schema_hint, result=result)
+            logger.debug("model fake response", prompt_chars=len(prompt), schema_keys=list((schema_hint or {}).keys()), result=sanitize_model_result(result))
             return result
 
         full_prompt = self._build_prompt(prompt, schema_hint)
-        logger.debug("model request", model=self.config.model, prompt=prompt, schema=schema_hint)
+        logger.debug("model request", model=self.config.model, prompt_chars=len(prompt), schema_keys=list((schema_hint or {}).keys()))
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False) as out:
             out_path = Path(out.name)
         try:
@@ -56,14 +57,21 @@ class CodexMiniClient:
                 timeout=90,
             )
             if proc.returncode != 0:
-                logger.error("model failed", model=self.config.model, stderr=proc.stderr, stdout=proc.stdout)
+                logger.error("model failed", model=self.config.model, stderr=_safe_error(proc.stderr), stdout=_safe_error(proc.stdout))
                 raise ModelError(_safe_error(proc.stderr or proc.stdout))
             raw = out_path.read_text(encoding="utf-8", errors="replace")
             result = extract_json_object(raw)
-            logger.debug("model response", model=self.config.model, stdout=proc.stdout, stderr=proc.stderr, raw=raw, result=result)
+            logger.debug(
+                "model response",
+                model=self.config.model,
+                stdout_chars=len(proc.stdout or ""),
+                stderr_chars=len(proc.stderr or ""),
+                raw_chars=len(raw),
+                result=sanitize_model_result(result),
+            )
             return result
         except subprocess.TimeoutExpired as exc:
-            logger.error("model timeout", model=self.config.model, prompt=prompt)
+            logger.error("model timeout", model=self.config.model, prompt_chars=len(prompt))
             raise ModelError("model call timed out") from exc
         finally:
             try:
@@ -91,7 +99,7 @@ class CodexMiniClient:
         if "rank memories" in lowered:
             return {"ranked_ids": [], "reason": "fake rank"}
         if "search intent" in lowered:
-            return {"should_search": True, "queries": ["memory"], "wing": None, "room": None}
+            return {"should_search": True, "queries": ["memory"]}
         if "consolidate memory cluster" in lowered:
             if "dynamic_cross_project" in lowered:
                 return {
@@ -129,9 +137,6 @@ class CodexMiniClient:
 
 def _safe_error(text: str) -> str:
     redacted = []
-    for line in text.splitlines()[:8]:
-        if "sk-" in line or "token" in line.lower() or "key" in line.lower():
-            redacted.append("[redacted]")
-        else:
-            redacted.append(line[:300])
+    for line in str(redact_secrets(text)).splitlines()[:8]:
+        redacted.append(line[:300])
     return "\n".join(redacted) or "model call failed"

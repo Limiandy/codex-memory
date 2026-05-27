@@ -162,33 +162,6 @@ class MemoryGovernance:
                 continue
         return {"updated": len(updated), "outcome": sentiment, "memory_ids": updated, "recall_id": event.get("id")}
 
-    def reconcile_mempalace(self, palace: Any, apply: bool = False) -> dict[str, Any]:
-        memories = self.ledger.list_memories(limit=200)
-        actions = []
-        for memory in memories:
-            status = memory.get("status")
-            has_drawer = bool(memory.get("mempalace_drawer_id"))
-            if status == "active" and not has_drawer:
-                actions.append({"action": "file_missing_active", "memory_id": memory["id"]})
-            if status != "active" and has_drawer:
-                actions.append({"action": "mark_stale_mempalace_drawer", "memory_id": memory["id"], "drawer_id": memory.get("mempalace_drawer_id")})
-        applied = []
-        if apply:
-            for action in actions:
-                memory = self.ledger.get_memory(str(action["memory_id"]))
-                if not memory:
-                    continue
-                if action["action"] == "file_missing_active":
-                    candidate = _candidate_from_memory(memory)
-                    filed = palace.file_candidate(candidate)
-                    if filed.get("drawer_id") or filed.get("skipped"):
-                        self.ledger.mark_filed(str(memory["id"]), filed.get("drawer_id"), list(filed.get("triple_ids") or []))
-                    applied.append({**action, "filed": filed})
-                elif action["action"] == "mark_stale_mempalace_drawer":
-                    self.ledger.add_review_feedback(str(memory["id"]), "mempalace_stale_drawer", str(action.get("drawer_id")))
-                    applied.append(action)
-        return {"issue_count": len(actions), "issues": actions, "applied": applied}
-
     def _apply_action(self, action: dict[str, Any]) -> dict[str, Any] | None:
         if action["action"] == "supersede_duplicates":
             keep_id = str(action.get("keep_id") or "")
@@ -475,8 +448,6 @@ def _candidate_from_memory(memory: dict[str, Any]):
         importance=float(memory.get("importance") or 0),
         ttl=str(memory.get("ttl") or "session"),
         scope=str(memory.get("scope") or "session"),
-        wing=memory.get("wing"),
-        room=memory.get("room"),
         domain=memory.get("domain"),
         category=memory.get("category"),
         subcategory=memory.get("subcategory"),

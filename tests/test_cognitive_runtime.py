@@ -15,7 +15,6 @@ def _service(tmp):
             model="gpt-5.4-mini",
             state_dir=tmp_path,
             ledger_path=tmp_path / "ledger.sqlite3",
-            palace_path=str(tmp_path / "palace"),
             min_active_confidence=0.82,
             min_quarantine_confidence=0.62,
             duplicate_threshold=0.9,
@@ -46,11 +45,9 @@ def _candidate(content, memory_type="experience", scope="global", domain="softwa
 class CognitiveRuntimeTest(unittest.TestCase):
     def setUp(self):
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
-        os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
 
     def tearDown(self):
         os.environ.pop("CODEX_MEMORY_FAKE_MODEL", None)
-        os.environ.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
 
     def test_memory_is_materialized_into_cognitive_layers(self):
         with tempfile.TemporaryDirectory() as tmp:

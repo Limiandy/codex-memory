@@ -10,14 +10,12 @@ from codex_memory.service import MemoryService
 class ServiceTest(unittest.TestCase):
     def test_ingest_fake_model_records_candidate(self):
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
-        os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             config = Config(
                 model="gpt-5.4-mini",
                 state_dir=tmp_path,
                 ledger_path=tmp_path / "ledger.sqlite3",
-                palace_path=str(tmp_path / "palace"),
                 min_active_confidence=0.82,
                 min_quarantine_confidence=0.62,
                 duplicate_threshold=0.9,
@@ -30,6 +28,6 @@ class ServiceTest(unittest.TestCase):
                 memories = service.list_memories(limit=5)
                 self.assertTrue(memories)
                 self.assertEqual(memories[0]["status"], "active")
-                self.assertEqual(memories[0]["review_json"]["filing_skipped"], "ledger_primary_mempalace_mirror_disabled")
+                self.assertEqual(memories[0]["review_json"]["storage"], "ledger_only")
             finally:
                 service.close()

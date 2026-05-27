@@ -39,8 +39,6 @@ class MemoryCandidate:
     importance: float
     ttl: str
     scope: str = "session"
-    wing: str | None = None
-    room: str | None = None
     domain: str | None = None
     category: str | None = None
     subcategory: str | None = None
@@ -63,8 +61,6 @@ class MemoryCandidate:
             importance=_float(data.get("importance"), 0.0),
             ttl=str(data.get("ttl") or "session").strip(),
             scope=str(data.get("scope") or "session").strip(),
-            wing=_optional_str(data.get("wing")),
-            room=_optional_str(data.get("room")),
             domain=_optional_str(data.get("domain")),
             category=_optional_str(data.get("category")),
             subcategory=_optional_str(data.get("subcategory")),
@@ -84,8 +80,6 @@ class MemoryCandidate:
             "importance": self.importance,
             "ttl": self.ttl,
             "scope": self.scope,
-            "wing": self.wing,
-            "room": self.room,
             "domain": self.domain,
             "category": self.category,
             "subcategory": self.subcategory,

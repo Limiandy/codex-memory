@@ -13,7 +13,6 @@ def _service(tmp):
         model="gpt-5.4-mini",
         state_dir=Path(tmp),
         ledger_path=Path(tmp) / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,
@@ -38,10 +37,10 @@ def _candidate(content, memory_type="experience", scope="project", importance=0.
 
 class RecallTest(unittest.TestCase):
     def setUp(self):
-        os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
+        pass
 
     def tearDown(self):
-        os.environ.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
+        pass
 
     def test_life_lighting_recall_does_not_pull_hook_memory(self):
         with tempfile.TemporaryDirectory() as tmp:

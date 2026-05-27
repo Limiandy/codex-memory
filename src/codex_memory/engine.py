@@ -5,6 +5,7 @@ from typing import Any
 from .config import Config
 from .model_client import CodexMiniClient, ModelError
 from .schema import MemoryCandidate
+from .security import sanitize_payload, sanitize_model_result
 
 
 class MemoryEngine:
@@ -13,12 +14,13 @@ class MemoryEngine:
         self.model = model
 
     def extract(self, event_type: str, payload: dict[str, Any]) -> list[MemoryCandidate]:
+        safe_payload = sanitize_payload(payload)
         prompt = (
             "Extract durable memory candidates from this Codex event. "
             "Prefer explicit user preferences, project context, decisions, solved problems, stable facts, "
             "and important task state. Skip routine chatter, transient commands, and anything unsupported by evidence.\n\n"
             f"Event type: {event_type}\n"
-            f"Payload: {payload}\n\n"
+            f"Payload: {safe_payload}\n\n"
             "Use concise Chinese content when the evidence is Chinese."
         )
         schema = {
@@ -31,8 +33,6 @@ class MemoryEngine:
                     "importance": 0.0,
                     "ttl": "short|session|long",
                     "scope": "global|project|session",
-                    "wing": "optional string",
-                    "room": "optional string",
                     "domain": "optional stable domain, e.g. memory_system|software_engineering|life|water_engineering|user_profile|general",
                     "category": "optional category, e.g. preference|architecture|troubleshooting|lesson|fact|workflow|quality",
                     "subcategory": "optional narrow topic, e.g. hook|mcp|logging|recall|review|lighting",
@@ -48,6 +48,7 @@ class MemoryEngine:
             result = self.model.complete_json(prompt, schema)
         except ModelError:
             return []
+        result = sanitize_model_result(result)
         raw_candidates = result.get("candidates", [])
         if not isinstance(raw_candidates, list):
             return []
@@ -60,7 +61,7 @@ class MemoryEngine:
             "or phrases like remember/之前/上次/偏好.\n\n"
             f"User message:\n{user_message}"
         )
-        schema = {"should_search": True, "queries": ["string"], "wing": None, "room": None}
+        schema = {"should_search": True, "queries": ["string"]}
         try:
             result = self.model.complete_json(prompt, schema)
         except ModelError:
@@ -71,8 +72,6 @@ class MemoryEngine:
         return {
             "should_search": bool(result.get("should_search")),
             "queries": [str(q) for q in queries[:3] if str(q).strip()],
-            "wing": result.get("wing"),
-            "room": result.get("room"),
         }
 
     def rank_memories(self, query: str, memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -89,7 +88,7 @@ class MemoryEngine:
         except ModelError:
             return memories
         ranked_ids = [str(item) for item in result.get("ranked_ids", [])]
-        by_id = {str(item.get("id") or item.get("drawer_id")): item for item in memories}
+        by_id = {str(item.get("id")): item for item in memories}
         ranked = [by_id[mid] for mid in ranked_ids if mid in by_id]
         rest = [item for item in memories if item not in ranked]
         return ranked + rest

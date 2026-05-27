@@ -37,14 +37,12 @@ def main() -> int:
     if args.clear_before and state_dir.exists():
         shutil.rmtree(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
-    os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
     os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
     service = MemoryService(
         Config(
             model="gpt-5.4-mini",
             state_dir=state_dir,
             ledger_path=state_dir / "ledger.sqlite3",
-            palace_path=None,
             min_active_confidence=0.82,
             min_quarantine_confidence=0.62,
             duplicate_threshold=0.9,

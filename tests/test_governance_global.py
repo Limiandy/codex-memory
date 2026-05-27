@@ -13,7 +13,6 @@ def _service(tmp):
         model="gpt-5.4-mini",
         state_dir=Path(tmp),
         ledger_path=Path(tmp) / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,
@@ -43,11 +42,9 @@ def _candidate(content):
 
 class GlobalGovernanceTest(unittest.TestCase):
     def setUp(self):
-        os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
 
     def tearDown(self):
-        os.environ.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
         os.environ.pop("CODEX_MEMORY_FAKE_MODEL", None)
 
     def test_governance_lowers_often_injected_unused_memory(self):
@@ -307,7 +304,7 @@ class GlobalGovernanceTest(unittest.TestCase):
             finally:
                 service.close()
 
-    def test_mempalace_reconcile_files_missing_active_when_apply(self):
+    def test_ledger_only_has_no_external_reconcile_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = _service(tmp)
             try:
@@ -316,9 +313,8 @@ class GlobalGovernanceTest(unittest.TestCase):
                     "active",
                     {"status": "active"},
                 )
-                result = service.reconcile_mempalace(apply=True)
                 memory = service.ledger.get_memory(memory_id)
-                self.assertTrue(result["applied"])
-                self.assertEqual(memory["review_json"].get("filing_skipped"), None)
+                self.assertFalse(hasattr(service, "reconcile_" + "mempalace"))
+                self.assertEqual(memory["status"], "active")
             finally:
                 service.close()

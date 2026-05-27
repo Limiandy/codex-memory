@@ -33,7 +33,6 @@ def main(argv: list[str] | None = None) -> int:
     promote = sub.add_parser("promote")
     promote.add_argument("memory_id")
     promote.add_argument("--note", default="")
-    promote.add_argument("--no-file", action="store_true")
 
     reject = sub.add_parser("reject")
     reject.add_argument("memory_id")
@@ -90,8 +89,6 @@ def main(argv: list[str] | None = None) -> int:
     govern_cognitive.add_argument("--full", action="store_true")
     periodic = sub.add_parser("govern-periodic")
     periodic.add_argument("--interval-minutes", type=int, default=60)
-    reconcile_mp = sub.add_parser("reconcile-mempalace")
-    reconcile_mp.add_argument("--apply", action="store_true")
 
     plugin = sub.add_parser("plugin")
     plugin_sub = plugin.add_subparsers(dest="plugin_cmd", required=True)
@@ -130,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "queue":
             return _print(service.list_memories(status=args.status, limit=args.limit))
         if args.cmd == "promote":
-            return _print(service.promote_memory(args.memory_id, note=args.note, file_to_mempalace=not args.no_file))
+            return _print(service.promote_memory(args.memory_id, note=args.note))
         if args.cmd == "reject":
             return _print(service.reject_memory(args.memory_id, note=args.note))
         if args.cmd == "delete":
@@ -177,8 +174,6 @@ def main(argv: list[str] | None = None) -> int:
             return _print(service.govern_cognitive(apply=args.apply, full=args.full))
         if args.cmd == "govern-periodic":
             return _print(service.periodic_governance(interval_minutes=args.interval_minutes))
-        if args.cmd == "reconcile-mempalace":
-            return _print(service.reconcile_mempalace(apply=args.apply))
         if args.cmd == "audit":
             return _print(
                 {

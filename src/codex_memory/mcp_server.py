@@ -7,8 +7,8 @@ from typing import Any, Callable
 from . import __version__
 from .config import ensure_state_dir, load_config
 from .ledger import Ledger
-from .mempalace_adapter import MemPalaceAdapter
 from .service import MemoryService
+from .schema import STATUSES
 
 
 TOOLS = {
@@ -45,13 +45,12 @@ TOOLS = {
         },
     },
     "codex_memory_promote": {
-        "description": "Promote a reviewed memory to active and optionally file it to MemPalace.",
+        "description": "Promote a reviewed memory to active in the local Ledger.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string"},
                 "note": {"type": "string", "default": ""},
-                "file_to_mempalace": {"type": "boolean", "default": True},
             },
             "required": ["memory_id"],
         },
@@ -110,21 +109,21 @@ TOOLS = {
             "properties": {"interval_minutes": {"type": "integer", "default": 60}},
         },
     },
-    "codex_memory_reconcile_mempalace": {
-        "description": "Check and optionally repair Ledger/MemPalace consistency.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"apply": {"type": "boolean", "default": False}},
-        },
-    },
     "codex_memory_audit": {
         "description": "Summarize memory review health and queue counts.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     "codex_memory_diagnostics": {
-        "description": "Run heavier diagnostics, including MemPalace status.",
+        "description": "Run heavier local Ledger diagnostics.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+}
+
+DANGEROUS_TOOLS = {
+    "codex_memory_promote",
+    "codex_memory_reject",
+    "codex_memory_delete",
+    "codex_memory_reconcile",
 }
 
 
@@ -137,44 +136,37 @@ def main() -> int:
         "codex_memory_search": lambda args: _with_service(
             lambda service: service.search_context(
                 str(args["query"]),
-                int(args.get("limit", 5)),
+                _limit(args.get("limit", 5)),
                 cwd=args.get("cwd"),
                 session_id=args.get("session_id"),
             )
         ),
         "codex_memory_ingest": lambda args: _with_service(
-            lambda service: service.ingest_event(str(args.get("event_type", "manual")), {"text": args["text"]})
+            lambda service: service.ingest_event(_event_type(args.get("event_type", "manual")), {"text": _text(args["text"]), "source": "mcp"})
         ),
-        "codex_memory_queue": lambda args: ledger.list_memories(args.get("status"), int(args.get("limit", 20))),
+        "codex_memory_queue": lambda args: ledger.list_memories(_status_arg(args.get("status")), _limit(args.get("limit", 20))),
         "codex_memory_promote": lambda args: _with_service(
-            lambda service: service.promote_memory(
-                str(args["memory_id"]),
-                str(args.get("note", "")),
-                bool(args.get("file_to_mempalace", True)),
-            )
+            lambda service: service.promote_memory(_id_arg(args["memory_id"], "memory_id"), str(args.get("note", "")))
         ),
         "codex_memory_reject": lambda args: _with_service(
-            lambda service: service.reject_memory(str(args["memory_id"]), str(args.get("note", "")))
+            lambda service: service.reject_memory(_id_arg(args["memory_id"], "memory_id"), str(args.get("note", "")))
         ),
         "codex_memory_delete": lambda args: _with_service(
-            lambda service: service.delete_memory(str(args["memory_id"]), str(args.get("note", "")))
+            lambda service: service.delete_memory(_id_arg(args["memory_id"], "memory_id"), str(args.get("note", "")))
         ),
         "codex_memory_recall_feedback": lambda args: _with_service(
             lambda service: service.recall_feedback(
-                str(args["memory_id"]),
-                str(args["outcome"]),
+                _id_arg(args["memory_id"], "memory_id"),
+                _outcome(args["outcome"]),
                 str(args.get("note", "")),
             )
         ),
         "codex_memory_expire": lambda args: _with_service(lambda service: service.expire_due_memories()),
         "codex_memory_reconcile": lambda args: _with_service(lambda service: service.reconcile()),
         "codex_memory_consolidate": lambda args: _with_service(lambda service: service.consolidate_memories()),
-        "codex_memory_govern": lambda args: _with_service(lambda service: service.govern_memories(bool(args.get("apply", False)))),
+        "codex_memory_govern": lambda args: _with_service(lambda service: service.govern_memories(_bool_arg(args.get("apply", False), "apply"))),
         "codex_memory_govern_periodic": lambda args: _with_service(
-            lambda service: service.periodic_governance(int(args.get("interval_minutes", 60)))
-        ),
-        "codex_memory_reconcile_mempalace": lambda args: _with_service(
-            lambda service: service.reconcile_mempalace(bool(args.get("apply", False)))
+            lambda service: service.periodic_governance(_limit(args.get("interval_minutes", 60), minimum=1, maximum=1440))
         ),
         "codex_memory_audit": lambda args: _audit(ledger),
         "codex_memory_diagnostics": lambda args: _diagnostics(config, ledger),
@@ -193,7 +185,7 @@ def _status(config, ledger: Ledger) -> dict[str, Any]:
     return {
         "ledger": ledger.stats(),
         "model": config.model,
-        "mempalace": {"status": "not_loaded", "hint": "Use codex_memory_diagnostics for MemPalace checks."},
+        "store": {"primary": "ledger", "external_mirror": "unsupported"},
     }
 
 
@@ -201,7 +193,7 @@ def _diagnostics(config, ledger: Ledger) -> dict[str, Any]:
     return {
         "ledger": ledger.stats(),
         "model": config.model,
-        "mempalace": MemPalaceAdapter(config).status(),
+        "store": {"primary": "ledger", "external_mirror": "unsupported"},
     }
 
 
@@ -242,6 +234,8 @@ def _handle(line: str, handlers: dict[str, Callable[[dict[str, Any]], Any]]) -> 
             args = params.get("arguments") or {}
             if name not in handlers:
                 raise ValueError(f"unknown tool: {name}")
+            if _is_dangerous_call(name, args) and not load_config().enable_dangerous_mcp_tools:
+                raise PermissionError(f"dangerous MCP tool disabled: {name}")
             result = handlers[name](args)
             _send({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]}})
             return
@@ -252,12 +246,89 @@ def _handle(line: str, handlers: dict[str, Callable[[dict[str, Any]], Any]]) -> 
             request_id = json.loads(line).get("id")
         except Exception:
             pass
-        _send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}})
+        code = -32001 if isinstance(exc, PermissionError) else -32602 if isinstance(exc, (TypeError, ValueError)) else -32000
+        _send({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": str(exc), "data": {"error_code": _error_code(exc), "hint": _error_hint(exc)}}})
 
 
 def _send(data: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def _limit(value: Any, minimum: int = 1, maximum: int = 100) -> int:
+    if isinstance(value, bool):
+        raise ValueError("limit must be an integer")
+    limit = int(value)
+    if limit < minimum or limit > maximum:
+        raise ValueError(f"limit must be between {minimum} and {maximum}")
+    return limit
+
+
+def _status_arg(value: Any) -> str | None:
+    if value is None:
+        return None
+    status = str(value)
+    if status not in STATUSES:
+        raise ValueError(f"invalid status: {status}")
+    return status
+
+
+def _event_type(value: Any) -> str:
+    event_type = str(value or "manual")
+    if len(event_type) > 64 or not event_type.replace("_", "").replace("-", "").isalnum():
+        raise ValueError("event_type must be a short alphanumeric identifier")
+    return event_type
+
+
+def _id_arg(value: Any, name: str) -> str:
+    item = str(value or "")
+    if not item or len(item) > 128:
+        raise ValueError(f"{name} must be a non-empty id under 128 chars")
+    return item
+
+
+def _text(value: Any) -> str:
+    text = str(value or "")
+    if not text.strip():
+        raise ValueError("text must not be empty")
+    return text[:12000]
+
+
+def _outcome(value: Any) -> str:
+    outcome = str(value)
+    if outcome not in {"positive", "negative"}:
+        raise ValueError("outcome must be positive or negative")
+    return outcome
+
+
+def _bool_arg(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be boolean")
+    return value
+
+
+def _is_dangerous_call(name: Any, args: dict[str, Any]) -> bool:
+    if name in DANGEROUS_TOOLS:
+        return True
+    if name == "codex_memory_govern":
+        return bool(args.get("apply", False))
+    return False
+
+
+def _error_code(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "dangerous_tool_disabled"
+    if isinstance(exc, (TypeError, ValueError)):
+        return "invalid_arguments"
+    return "internal_error"
+
+
+def _error_hint(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "Set CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS=1 or enable_dangerous_mcp_tools=true to allow this tool."
+    if isinstance(exc, (TypeError, ValueError)):
+        return "Check the tool input schema and argument ranges."
+    return "See Codex Memory logs for details."
 
 
 if __name__ == "__main__":

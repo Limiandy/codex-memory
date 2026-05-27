@@ -19,7 +19,6 @@ class ReviewTest(unittest.TestCase):
                 model="gpt-5.4-mini",
                 state_dir=tmp_path,
                 ledger_path=tmp_path / "ledger.sqlite3",
-                palace_path=None,
                 min_active_confidence=0.82,
                 min_quarantine_confidence=0.62,
                 duplicate_threshold=0.9,

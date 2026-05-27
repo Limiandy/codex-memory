@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ class Ledger:
         self.conn = sqlite3.connect(str(path), timeout=60)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=60000")
+        self._transaction_depth = 0
         self._init_with_retry()
 
     def close(self) -> None:
@@ -47,8 +49,6 @@ class Ledger:
                 ttl TEXT NOT NULL,
                 confidence REAL NOT NULL,
                 importance REAL NOT NULL,
-                wing TEXT,
-                room TEXT,
                 domain TEXT,
                 category TEXT,
                 subcategory TEXT,
@@ -64,8 +64,6 @@ class Ledger:
                 evidence_json TEXT NOT NULL,
                 reason TEXT,
                 review_json TEXT NOT NULL DEFAULT '{}',
-                mempalace_drawer_id TEXT,
-                kg_triple_ids_json TEXT NOT NULL DEFAULT '[]',
                 supersedes_id TEXT,
                 expires_at TEXT,
                 review_feedback_json TEXT NOT NULL DEFAULT '[]',
@@ -195,11 +193,43 @@ class Ledger:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_runtime_state_subject ON runtime_state_transitions(subject_type,subject_id,created_at);
+
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
             """
         )
+        self._record_schema_baseline()
         self._ensure_event_columns()
         self._ensure_memory_columns()
-        self.conn.commit()
+        self._commit()
+
+    @contextmanager
+    def transaction(self):
+        outermost = self._transaction_depth == 0
+        self._transaction_depth += 1
+        try:
+            yield
+            self._transaction_depth -= 1
+            if outermost:
+                self.conn.commit()
+        except Exception:
+            self._transaction_depth -= 1
+            if outermost:
+                self.conn.rollback()
+            raise
+
+    def _commit(self) -> None:
+        if self._transaction_depth == 0:
+            self.conn.commit()
+
+    def _record_schema_baseline(self) -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+            (1, "baseline_ledger_cognitive_runtime", _now()),
+        )
 
     def _ensure_memory_columns(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
@@ -269,7 +299,7 @@ class Ledger:
             "INSERT INTO events(id,event_type,payload_json,created_at) VALUES(?,?,?,?)",
             (event_id, event_type, json.dumps(payload, ensure_ascii=False), _now()),
         )
-        self.conn.commit()
+        self._commit()
         return event_id
 
     def record_cognitive_record(
@@ -338,7 +368,7 @@ class Ledger:
                 now,
             ),
         )
-        self.conn.commit()
+        self._commit()
         row = self.conn.execute("SELECT * FROM cognitive_records WHERE id=?", (record_id,)).fetchone()
         if row is None:
             row = self.conn.execute(
@@ -380,7 +410,7 @@ class Ledger:
                 now,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_cognitive_edges(self, relation: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 5000))
@@ -430,7 +460,7 @@ class Ledger:
             "UPDATE cognitive_records SET status=?, metadata_json=?, updated_at=? WHERE id=?",
             (status, json.dumps(metadata, ensure_ascii=False), _now(), record_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.get_cognitive_record(record_id)
 
     def patch_cognitive_record_metadata(self, record_id: str, metadata_patch: dict[str, Any]) -> dict[str, Any] | None:
@@ -443,7 +473,7 @@ class Ledger:
             "UPDATE cognitive_records SET metadata_json=?, updated_at=? WHERE id=?",
             (json.dumps(metadata, ensure_ascii=False), _now(), record_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.get_cognitive_record(record_id)
 
     def adjust_cognitive_record_strength(self, record_id: str, delta: float, metadata_patch: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -462,7 +492,7 @@ class Ledger:
             """,
             (float(delta), json.dumps(metadata, ensure_ascii=False), _now(), record_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.get_cognitive_record(record_id)
 
     def record_state_transition(
@@ -492,7 +522,7 @@ class Ledger:
                 _now(),
             ),
         )
-        self.conn.commit()
+        self._commit()
         return transition_id
 
     def latest_state_for(self, subject_type: str, subject_id: str) -> str | None:
@@ -529,14 +559,14 @@ class Ledger:
             "UPDATE events SET processed_at=?, process_error=NULL WHERE id=?",
             (_now(), event_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def mark_event_failed(self, event_id: str, error: str) -> None:
         self.conn.execute(
             "UPDATE events SET process_error=? WHERE id=?",
             (error[:1000], event_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def add_candidate(
         self,
@@ -552,11 +582,11 @@ class Ledger:
         self.conn.execute(
             """
             INSERT INTO memories(
-                id,status,content,memory_type,scope,ttl,confidence,importance,wing,room,
+                id,status,content,memory_type,scope,ttl,confidence,importance,
                 domain,category,subcategory,abstraction_level,triggers_json,
                 project_key,source_session_id,
                 evidence_json,reason,review_json,expires_at,created_at,updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 memory_id,
@@ -567,8 +597,6 @@ class Ledger:
                 candidate.ttl,
                 candidate.confidence,
                 candidate.importance,
-                candidate.wing,
-                candidate.room,
                 candidate.domain,
                 candidate.category,
                 candidate.subcategory,
@@ -584,7 +612,7 @@ class Ledger:
                 now,
             ),
         )
-        self.conn.commit()
+        self._commit()
         return memory_id
 
     def get_memory(self, memory_id: str) -> dict[str, Any] | None:
@@ -659,7 +687,7 @@ class Ledger:
             "UPDATE memories SET supersedes_id=?, updated_at=? WHERE id=?",
             (old_id, _now(), new_id),
         )
-        self.conn.commit()
+        self._commit()
 
     def add_review_feedback(self, memory_id: str, action: str, note: str = "") -> dict[str, Any]:
         memory = self.get_memory(memory_id)
@@ -671,7 +699,7 @@ class Ledger:
             "UPDATE memories SET review_feedback_json=?, updated_at=? WHERE id=?",
             (json.dumps(feedback, ensure_ascii=False), _now(), memory_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.get_memory(memory_id) or {}
 
     def promote(self, memory_id: str, note: str = "") -> dict[str, Any]:
@@ -730,19 +758,8 @@ class Ledger:
               AND event_type IN ('session_start','session_end','precompact','after_tool_call')
             """
         )
-        self.conn.commit()
+        self._commit()
         return int(cur.rowcount or 0)
-
-    def mark_filed(self, memory_id: str, drawer_id: str | None, triple_ids: list[str]) -> None:
-        self.conn.execute(
-            """
-            UPDATE memories
-            SET mempalace_drawer_id=?, kg_triple_ids_json=?, updated_at=?
-            WHERE id=?
-            """,
-            (drawer_id, json.dumps(triple_ids, ensure_ascii=False), _now(), memory_id),
-        )
-        self.conn.commit()
 
     def link_related_active_memories(self, memory_id: str) -> int:
         memory = self.get_memory(memory_id)
@@ -797,7 +814,7 @@ class Ledger:
                 now,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def list_edges(self, memory_ids: list[str] | None = None, limit: int = 500) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 2000))
@@ -894,7 +911,7 @@ class Ledger:
             for target_id in memory_ids[index + 1 :]:
                 self.upsert_edge(source_id, target_id, "co_recalled", 0.55, {"recall_id": recall_id})
                 self.upsert_edge(target_id, source_id, "co_recalled", 0.55, {"recall_id": recall_id})
-        self.conn.commit()
+        self._commit()
         return recall_id
 
     def record_recall_outcome(
@@ -940,7 +957,7 @@ class Ledger:
                 """,
                 (now, memory_id),
             )
-        self.conn.commit()
+        self._commit()
         return {"updated": len(adopted), "recall_id": event["id"], "adopted": adopted}
 
     def register_recall_feedback(self, memory_id: str, outcome: str, note: str = "") -> dict[str, Any]:
@@ -958,7 +975,7 @@ class Ledger:
             """,
             (delta, _now(), memory_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.add_review_feedback(memory_id, f"recall_{outcome}", note)
 
     def adjust_strength(self, memory_id: str, delta: float, note: str) -> dict[str, Any]:
@@ -971,7 +988,7 @@ class Ledger:
             """,
             (float(delta), _now(), memory_id),
         )
-        self.conn.commit()
+        self._commit()
         return self.add_review_feedback(memory_id, "governance_strength_adjust", note)
 
     def record_governance_report(self, report: dict[str, Any], actions: list[dict[str, Any]]) -> str:
@@ -988,7 +1005,7 @@ class Ledger:
                 _now(),
             ),
         )
-        self.conn.commit()
+        self._commit()
         return report_id
 
     def add_governance_policy(
@@ -1029,7 +1046,7 @@ class Ledger:
                 now,
             ),
         )
-        self.conn.commit()
+        self._commit()
         return policy_id
 
     def list_governance_policies(self, policy_type: str | None = None, active: bool = True) -> list[dict[str, Any]]:
@@ -1057,7 +1074,7 @@ class Ledger:
                     "UPDATE governance_policies SET hit_count=hit_count+1,last_hit_at=?,updated_at=? WHERE id=?",
                     (now, now, policy["id"]),
                 )
-                self.conn.commit()
+                self._commit()
                 return {
                     "policy_id": policy["id"],
                     "action": policy["action"],
@@ -1077,7 +1094,7 @@ class Ledger:
                     "UPDATE governance_policies SET hit_count=hit_count+1,last_hit_at=?,updated_at=? WHERE id=?",
                     (now, now, policy["id"]),
                 )
-                self.conn.commit()
+                self._commit()
                 return {
                     "policy_id": policy["id"],
                     "action": policy["action"],
@@ -1097,7 +1114,7 @@ class Ledger:
             """,
             (now, now),
         )
-        self.conn.commit()
+        self._commit()
         return int(cur.rowcount or 0)
 
     def set_governance_state(self, key: str, value: Any) -> None:
@@ -1110,7 +1127,7 @@ class Ledger:
             """,
             (key, json.dumps(value, ensure_ascii=False), now),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_governance_state(self, key: str) -> Any:
         row = self.conn.execute("SELECT value FROM governance_state WHERE key=?", (key,)).fetchone()
@@ -1147,7 +1164,7 @@ class Ledger:
                 "UPDATE memories SET status=?, review_json=?, updated_at=? WHERE id=?",
                 (status, json.dumps(review, ensure_ascii=False), _now(), memory_id),
             )
-        self.conn.commit()
+        self._commit()
 
     def list_memories(self, status: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 200))
@@ -1177,7 +1194,7 @@ class Ledger:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
-    for key in ("evidence_json", "review_json", "kg_triple_ids_json", "review_feedback_json", "triggers_json"):
+    for key in ("evidence_json", "review_json", "review_feedback_json", "triggers_json"):
         try:
             data[key] = json.loads(data[key])
         except (TypeError, json.JSONDecodeError):

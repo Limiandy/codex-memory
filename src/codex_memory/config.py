@@ -14,13 +14,12 @@ class Config:
     model: str
     state_dir: Path
     ledger_path: Path
-    palace_path: str | None
     min_active_confidence: float
     min_quarantine_confidence: float
     duplicate_threshold: float
     max_evidence_quote_chars: int
     primary_store: str = "ledger"
-    mirror_mempalace: bool = False
+    enable_dangerous_mcp_tools: bool = False
 
 
 def _default_state_dir() -> Path:
@@ -38,22 +37,22 @@ def load_config() -> Config:
             data = {}
 
     model = os.environ.get("CODEX_MEMORY_MODEL") or data.get("model") or DEFAULT_MODEL
-    palace_path = os.environ.get("MEMPALACE_PALACE_PATH") or data.get("palace_path")
     ledger_path = Path(data.get("ledger_path") or state_dir / "ledger.sqlite3").expanduser()
-    primary_store = str(os.environ.get("CODEX_MEMORY_PRIMARY_STORE") or data.get("primary_store") or "ledger")
-    mirror_mempalace = _bool(os.environ.get("CODEX_MEMORY_MIRROR_MEMPALACE"), bool(data.get("mirror_mempalace", False)))
+    enable_dangerous_mcp_tools = _bool(
+        os.environ.get("CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS"),
+        bool(data.get("enable_dangerous_mcp_tools", False)),
+    )
 
     return Config(
         model=str(model),
         state_dir=state_dir,
         ledger_path=ledger_path,
-        palace_path=str(palace_path) if palace_path else None,
         min_active_confidence=float(data.get("min_active_confidence", 0.82)),
         min_quarantine_confidence=float(data.get("min_quarantine_confidence", 0.62)),
         duplicate_threshold=float(data.get("duplicate_threshold", 0.9)),
         max_evidence_quote_chars=int(data.get("max_evidence_quote_chars", 500)),
-        primary_store=primary_store,
-        mirror_mempalace=mirror_mempalace,
+        primary_store="ledger",
+        enable_dangerous_mcp_tools=enable_dangerous_mcp_tools,
     )
 
 

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" session_start"
+            "command": "bash -lc 'CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/hooks/codex-memory-hook.sh\" session_start'"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" session_end"
+            "command": "bash -lc 'CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/hooks/codex-memory-hook.sh\" session_end'"
           }
         ]
       }
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"/Users/limengkai/plugins/codex-memory/hooks/codex-memory-hook.sh\" precompact"
+            "command": "bash -lc 'CODEX_PLUGIN_ROOT=\"${CODEX_PLUGIN_ROOT:-$HOME/plugins/codex-memory}\"; \"$CODEX_PLUGIN_ROOT/hooks/codex-memory-hook.sh\" precompact'"
           }
         ]
       }

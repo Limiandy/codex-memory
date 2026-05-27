@@ -11,27 +11,23 @@ from codex_memory.service import MemoryService
 class LocalStoreTest(unittest.TestCase):
     def setUp(self):
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
-        os.environ.pop("CODEX_MEMORY_MIRROR_MEMPALACE", None)
 
     def tearDown(self):
         os.environ.pop("CODEX_MEMORY_FAKE_MODEL", None)
         os.environ.pop("CODEX_MEMORY_STATE_DIR", None)
-        os.environ.pop("CODEX_MEMORY_MIRROR_MEMPALACE", None)
 
-    def test_default_config_uses_ledger_primary_without_mempalace_mirror(self):
+    def test_default_config_uses_ledger_primary(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.environ["CODEX_MEMORY_STATE_DIR"] = tmp
             config = load_config()
             self.assertEqual(config.primary_store, "ledger")
-            self.assertFalse(config.mirror_mempalace)
 
-    def test_active_memory_is_usable_without_mempalace(self):
+    def test_active_memory_is_usable_with_ledger_only_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(
                 model="gpt-5.4-mini",
                 state_dir=Path(tmp),
                 ledger_path=Path(tmp) / "ledger.sqlite3",
-                palace_path=str(Path(tmp) / "palace"),
                 min_active_confidence=0.82,
                 min_quarantine_confidence=0.62,
                 duplicate_threshold=0.9,
@@ -41,7 +37,7 @@ class LocalStoreTest(unittest.TestCase):
             try:
                 memory_id = service.ledger.add_candidate(
                     MemoryCandidate(
-                        content="经验：自有 ledger 数据层必须作为主存储，MemPalace 只能作为可选镜像。",
+                        content="经验：自有 ledger 数据层必须作为唯一主存储。",
                         memory_type="experience",
                         proposed_action="store",
                         confidence=0.95,
@@ -50,8 +46,8 @@ class LocalStoreTest(unittest.TestCase):
                         scope="global",
                         domain="memory_system",
                         category="architecture",
-                        subcategory="mempalace",
-                        triggers=["ledger", "MemPalace", "主存储"],
+                        subcategory="ledger",
+                        triggers=["ledger", "主存储"],
                         evidence=[Evidence(source="test", quote="自有 ledger 数据层必须作为主存储")],
                         reason="local store test",
                     ),
@@ -61,8 +57,8 @@ class LocalStoreTest(unittest.TestCase):
                 service.runtime.sync_memory(memory_id)
                 status = service.status()
                 self.assertTrue(status["store"]["primary"])
-                self.assertTrue(status["mempalace"]["disabled"])
-                result = service.store.search("ledger 主存储 MemPalace", limit=3)
+                self.assertNotIn("mempalace", status)
+                result = service.store.search("ledger 主存储", limit=3)
                 self.assertEqual(result[0]["id"], memory_id)
             finally:
                 service.close()

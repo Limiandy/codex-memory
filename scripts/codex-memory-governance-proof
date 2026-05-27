@@ -12,7 +12,6 @@ from codex_memory.service import MemoryService
 
 
 def main() -> int:
-    os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
     os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
     with tempfile.TemporaryDirectory() as tmp:
         service = _service(tmp)
@@ -24,7 +23,6 @@ def main() -> int:
                     _scenario_living_policy_repairs_admission_and_recall(service),
                     _scenario_dynamic_budget(service),
                     _scenario_periodic_governance(service),
-                    _scenario_mempalace_reconcile(service),
                 ]
             }
             report["passed"] = all(item["passed"] for item in report["scenarios"])
@@ -40,7 +38,6 @@ def _service(tmp: str) -> MemoryService:
         model="gpt-5.4-mini",
         state_dir=path,
         ledger_path=path / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,
@@ -222,23 +219,6 @@ def _scenario_periodic_governance(service: MemoryService) -> dict:
         "goal": "治理能自动按周期运行，避免依赖用户定时审计",
         "first_result": "ran" if "report" in first else first,
         "second_result": second,
-        "passed": passed,
-    }
-
-
-def _scenario_mempalace_reconcile(service: MemoryService) -> dict:
-    memory_id = service.ledger.add_candidate(
-        _candidate("经验：测试质量要结合覆盖率、边界用例和真实运行报告。"),
-        "active",
-        {"status": "active"},
-    )
-    result = service.reconcile_mempalace(apply=True)
-    passed = bool(result["applied"]) and result["applied"][0]["action"] == "file_missing_active"
-    return {
-        "name": "ledger_mempalace_reconcile",
-        "goal": "active 记忆缺少 MemPalace 写入记录时能被对账发现并修复",
-        "memory_id": memory_id,
-        "result": result,
         "passed": passed,
     }
 

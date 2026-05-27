@@ -14,7 +14,6 @@ def _service(tmp):
         model="gpt-5.4-mini",
         state_dir=Path(tmp),
         ledger_path=Path(tmp) / "ledger.sqlite3",
-        palace_path=None,
         min_active_confidence=0.82,
         min_quarantine_confidence=0.62,
         duplicate_threshold=0.9,
@@ -43,11 +42,9 @@ def _project_memory(text, cwd):
 
 class ConsolidationTest(unittest.TestCase):
     def setUp(self):
-        os.environ["CODEX_MEMORY_DISABLE_MEMPALACE"] = "1"
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
 
     def tearDown(self):
-        os.environ.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
         os.environ.pop("CODEX_MEMORY_FAKE_MODEL", None)
 
     def test_frontend_cross_stack_memories_form_global_experience(self):

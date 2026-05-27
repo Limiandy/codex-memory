@@ -13,7 +13,6 @@ class McpTest(unittest.TestCase):
             env = {
                 "PYTHONPATH": "src",
                 "CODEX_MEMORY_FAKE_MODEL": "1",
-                "CODEX_MEMORY_DISABLE_MEMPALACE": "1",
                 "CODEX_MEMORY_STATE_DIR": tmp,
             }
             proc = subprocess.Popen(
@@ -39,6 +38,7 @@ class McpTest(unittest.TestCase):
                 self.assertIn("codex_memory_diagnostics", names)
                 self.assertIn("codex_memory_promote", names)
                 self.assertIn("codex_memory_audit", names)
+                self.assertFalse(any("mempalace" in name for name in names))
             finally:
                 for stream in (proc.stdin, proc.stdout, proc.stderr):
                     if stream is not None:
@@ -94,9 +94,105 @@ class McpTest(unittest.TestCase):
                 queue = json.loads(proc.stdout.readline())
                 status_text = json.loads(status["result"]["content"][0]["text"])
                 queue_text = json.loads(queue["result"]["content"][0]["text"])
-                self.assertEqual(status_text["mempalace"]["status"], "not_loaded")
+                self.assertEqual(status_text["store"]["primary"], "ledger")
                 self.assertEqual(queue_text, [])
                 self.assertTrue((Path(tmp) / "ledger.sqlite3").exists())
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+    def test_dangerous_tool_is_disabled_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_STATE_DIR": tmp,
+            }
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "codex_memory.mcp_server"],
+                cwd=".",
+                env={**os.environ, **env},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert proc.stdin is not None
+                assert proc.stdout is not None
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+                proc.stdin.write(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {"name": "codex_memory_delete", "arguments": {"memory_id": "mem_test"}},
+                        }
+                    )
+                    + "\n"
+                )
+                proc.stdin.flush()
+                json.loads(proc.stdout.readline())
+                response = json.loads(proc.stdout.readline())
+                self.assertEqual(response["error"]["data"]["error_code"], "dangerous_tool_disabled")
+            finally:
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+    def test_invalid_args_return_structured_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_STATE_DIR": tmp,
+            }
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "codex_memory.mcp_server"],
+                cwd=".",
+                env={**os.environ, **env},
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert proc.stdin is not None
+                assert proc.stdout is not None
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
+                proc.stdin.write(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {"name": "codex_memory_queue", "arguments": {"limit": 0}},
+                        }
+                    )
+                    + "\n"
+                )
+                proc.stdin.flush()
+                json.loads(proc.stdout.readline())
+                response = json.loads(proc.stdout.readline())
+                self.assertEqual(response["error"]["data"]["error_code"], "invalid_arguments")
             finally:
                 for stream in (proc.stdin, proc.stdout, proc.stderr):
                     if stream is not None:

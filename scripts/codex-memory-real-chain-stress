@@ -63,16 +63,14 @@ def main() -> int:
     parser.add_argument("--govern-every", type=int, default=25)
     parser.add_argument("--wait-timeout", type=int, default=180)
     parser.add_argument("--state-dir", default="/private/tmp/codex-memory-real-chain-state")
-    parser.add_argument("--mempalace-dir", default="/private/tmp/codex-memory-real-chain-mempalace")
     parser.add_argument("--log-dir", default="/private/tmp/codex-memory-real-chain-logs")
     parser.add_argument("--clear-before", action="store_true")
     args = parser.parse_args()
 
     state_dir = Path(args.state_dir)
-    mempalace_dir = Path(args.mempalace_dir)
     log_dir = Path(args.log_dir)
     if args.clear_before:
-        for path in (state_dir, mempalace_dir, log_dir):
+        for path in (state_dir, log_dir):
             if path.exists():
                 shutil.rmtree(path)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +86,7 @@ def main() -> int:
         turn_id = f"real-chain-turn-{turn_number:04d}"
         prompt = f"[real-{turn_number:04d}/{kind}] {text}"
         before = event_ids(state_dir)
-        user_result = call_hook("user_message", payload(session_id, turn_id, prompt, cwd, state_dir), state_dir, mempalace_dir, log_dir)
+        user_result = call_hook("user_message", payload(session_id, turn_id, prompt, cwd, state_dir), state_dir, log_dir)
         event_id = newest_event_id(state_dir, before)
         processed = wait_event_processed(state_dir, event_id, args.wait_timeout) if event_id else False
         assistant_message = assistant_response(assistant_mode, user_result)
@@ -101,13 +99,12 @@ def main() -> int:
                 "last_assistant_message": assistant_message,
             },
             state_dir,
-            mempalace_dir,
             log_dir,
         )
         governed = None
         if turn_number % args.govern_every == 0:
             before_metrics = metrics(state_dir)
-            governed = govern(state_dir, mempalace_dir, log_dir)
+            governed = govern(state_dir, log_dir)
             after_metrics = metrics(state_dir)
             snapshots.append({"round": turn_number, "before": before_metrics, "governed": governed, "after": after_metrics})
         item = {
@@ -121,13 +118,13 @@ def main() -> int:
             "metrics": compact_metrics(state_dir),
         }
         rounds.append(item)
-        write_report(state_dir, mempalace_dir, log_dir, start, args, rounds, snapshots, partial=True)
+        write_report(state_dir, log_dir, start, args, rounds, snapshots, partial=True)
         print(
             f"{turn_number:03d}/{args.rounds} {kind} processed={processed} injected={bool(user_result.get('hookSpecificOutput'))} active={item['metrics'].get('active')}",
             flush=True,
         )
 
-    report = write_report(state_dir, mempalace_dir, log_dir, start, args, rounds, snapshots, partial=False)
+    report = write_report(state_dir, log_dir, start, args, rounds, snapshots, partial=False)
     print(f"REPORT {REPORT_PATH}")
     print(json.dumps(summary(report), ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
@@ -146,13 +143,11 @@ def payload(session_id: str, turn_id: str, prompt: str, cwd: str, state_dir: Pat
     }
 
 
-def call_hook(hook: str, data: dict[str, Any], state_dir: Path, mempalace_dir: Path, log_dir: Path) -> dict[str, Any]:
+def call_hook(hook: str, data: dict[str, Any], state_dir: Path, log_dir: Path) -> dict[str, Any]:
     env = os.environ.copy()
     env.pop("CODEX_MEMORY_FAKE_MODEL", None)
-    env.pop("CODEX_MEMORY_DISABLE_MEMPALACE", None)
     env["PLUGIN_ROOT"] = str(PLUGIN_ROOT)
     env["CODEX_MEMORY_STATE_DIR"] = str(state_dir)
-    env["MEMPALACE_PALACE_PATH"] = str(mempalace_dir)
     env["CODEX_MEMORY_LOG_DIR"] = str(log_dir)
     env["CODEX_MEMORY_LOG_LEVEL"] = "DEBUG"
     proc = subprocess.run(
@@ -172,10 +167,9 @@ def call_hook(hook: str, data: dict[str, Any], state_dir: Path, mempalace_dir: P
         return {"raw": proc.stdout}
 
 
-def govern(state_dir: Path, mempalace_dir: Path, log_dir: Path) -> dict[str, Any]:
+def govern(state_dir: Path, log_dir: Path) -> dict[str, Any]:
     env = os.environ.copy()
     env["CODEX_MEMORY_STATE_DIR"] = str(state_dir)
-    env["MEMPALACE_PALACE_PATH"] = str(mempalace_dir)
     env["CODEX_MEMORY_LOG_DIR"] = str(log_dir)
     proc = subprocess.run([str(CLI), "govern", "--apply"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=60)
     if proc.returncode != 0:
@@ -327,7 +321,6 @@ def false_active_reasons(memory: dict[str, Any]) -> list[str]:
 
 def write_report(
     state_dir: Path,
-    mempalace_dir: Path,
     log_dir: Path,
     start: float,
     args: argparse.Namespace,
@@ -355,7 +348,6 @@ def write_report(
         "rounds_completed": len(rounds),
         "govern_every": args.govern_every,
         "state_dir": str(state_dir),
-        "mempalace_dir": str(mempalace_dir),
         "log_dir": str(log_dir),
         "metrics": data,
         "snapshots": snapshots,
@@ -392,7 +384,7 @@ def compact_hook_output(data: dict[str, Any]) -> dict[str, Any]:
 
 def _memory(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
-    for key in ("evidence_json", "review_json", "kg_triple_ids_json", "review_feedback_json", "triggers_json"):
+    for key in ("evidence_json", "review_json", "review_feedback_json", "triggers_json"):
         try:
             data[key] = json.loads(data[key])
         except (TypeError, json.JSONDecodeError):
