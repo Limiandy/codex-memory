@@ -40,7 +40,7 @@ class DurableSkillManager:
 
     def stats(self) -> dict[str, Any]:
         skills = self.list(status=None, limit=1000)
-        by_status: dict[str, int] = {}
+        by_status: dict[str, int] = {status: 0 for status in ("candidate", "active", "suppressed", "deprecated", "rejected")}
         needs_review = []
         for skill in skills:
             status = str(skill.get("status") or "unknown")
@@ -57,6 +57,8 @@ class DurableSkillManager:
             "top_by_success": _top(skills, "success_count"),
             "top_by_failure": _top(skills, "failure_count"),
             "needs_review": needs_review[:20],
+            "recent_candidates": _recent([skill for skill in skills if skill.get("status") == "candidate"]),
+            "recent_active": _recent([skill for skill in skills if skill.get("status") == "active"]),
         }
 
     def _set_status(self, skill_id: str, status: str, note: str, source: str, extra: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -138,3 +140,7 @@ def _utc_now() -> str:
 
 def _top(skills: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     return sorted(skills, key=lambda item: int((item.get("metadata_json") or {}).get(field) or 0), reverse=True)[:10]
+
+
+def _recent(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(skills, key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)[:10]

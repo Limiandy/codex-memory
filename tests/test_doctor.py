@@ -41,6 +41,7 @@ class DoctorTest(unittest.TestCase):
             self.assertIn("summary", result)
             self.assertIn("sqlite_ledger", result["checks"])
             self.assertIn("schema_migrations", result["checks"])
+            self.assertIn("runtime_skill_governance", result["checks"])
             self.assertIn("python_version", result["checks"])
             self.assertIn("sqlite_version", result["checks"])
             self.assertEqual(result["checks"]["sqlite_ledger"]["level"], "fatal")
@@ -51,6 +52,12 @@ class DoctorTest(unittest.TestCase):
             result = run_doctor(_config(tmp))
             self.assertTrue(result["checks"]["sqlite_ledger"]["ok"])
             self.assertTrue(result["checks"]["schema_migrations"]["ok"])
+            self.assertTrue(result["checks"]["runtime_skill_governance"]["ok"])
+            governance = result["checks"]["runtime_skill_governance"]
+            self.assertIn("runtime_skill_records", governance)
+            self.assertIn("seed_skill_status", governance)
+            self.assertIn("dynamic_skill_status", governance)
+            self.assertTrue(governance["benchmark"]["available"])
             self.assertTrue(result["checks"]["mcp_server"]["ok"])
             self.assertEqual(result["checks"]["model_smoke"]["level"], "info")
 

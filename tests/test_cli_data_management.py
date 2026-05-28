@@ -282,12 +282,12 @@ class CliDataManagementTest(unittest.TestCase):
             self.assertEqual(
                 benchmark_payload["categories"],
                 {
-                    "direct_answer": 50,
-                    "creative_design": 50,
-                    "planning_business": 50,
-                    "engineering": 50,
-                    "ambiguous": 50,
-                    "feedback": 50,
+                    "direct_answer": 60,
+                    "creative_design": 60,
+                    "planning_business": 60,
+                    "engineering": 60,
+                    "ambiguous": 40,
+                    "feedback": 80,
                 },
             )
             fixture_path = Path(benchmark_payload["source"])

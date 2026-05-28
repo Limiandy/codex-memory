@@ -262,6 +262,24 @@ class RuntimeSkillTest(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_runtime_skill_cache_key_includes_basis_metadata_model_and_privacy(self):
+        from codex_memory.service import _runtime_skill_cache_key
+
+        basis = {
+            "memories": [{"id": "mem1", "updated_at": "t1", "status": "active", "confidence": 0.9, "importance": 0.7}],
+            "durable_skills": [{"id": "dyn1", "updated_at": "t1", "status": "active", "strength": 1.0, "metadata_json": {"success_count": 1, "failure_count": 0}}],
+            "seed_skills": [{"id": "seed1", "updated_at": "t1", "status": "active", "strength": 1.0, "metadata_json": {"trust_state": "trusted", "success_count": 1, "failure_count": 0}}],
+        }
+        original = _runtime_skill_cache_key("帮我画一个品牌 logo", basis, model="m1", strict_privacy=False)
+        changed_memory = {**basis, "memories": [{**basis["memories"][0], "confidence": 0.8}]}
+        changed_durable = {**basis, "durable_skills": [{**basis["durable_skills"][0], "strength": 0.8}]}
+        changed_seed = {**basis, "seed_skills": [{**basis["seed_skills"][0], "metadata_json": {"trust_state": "suppressed", "success_count": 1, "failure_count": 3}}]}
+        self.assertNotEqual(original, _runtime_skill_cache_key("帮我画一个品牌 logo", changed_memory, model="m1", strict_privacy=False))
+        self.assertNotEqual(original, _runtime_skill_cache_key("帮我画一个品牌 logo", changed_durable, model="m1", strict_privacy=False))
+        self.assertNotEqual(original, _runtime_skill_cache_key("帮我画一个品牌 logo", changed_seed, model="m1", strict_privacy=False))
+        self.assertNotEqual(original, _runtime_skill_cache_key("帮我画一个品牌 logo", basis, model="m2", strict_privacy=False))
+        self.assertNotEqual(original, _runtime_skill_cache_key("帮我画一个品牌 logo", basis, model="m1", strict_privacy=True))
+
     def test_logo_request_generates_memory_grounded_intake_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = _service(tmp)
@@ -809,8 +827,12 @@ class RuntimeSkillTest(unittest.TestCase):
         self.assertEqual(classifier.classify("这个模板不适合").feedback_target, "seed_skill")
         self.assertEqual(classifier.classify("不要用这个模板").feedback_target, "seed_skill")
         self.assertEqual(classifier.classify("dynamic skill 过时了").feedback_target, "durable_skill")
-        self.assertEqual(classifier.classify("方向对，但问题太多").outcome, "mixed")
-        self.assertFalse(classifier.classify("方向对，但问题太多").adjust_seed_skill_strength)
+        mixed = classifier.classify("方向对，但问题太多")
+        self.assertEqual(mixed.outcome, "mixed")
+        self.assertEqual(mixed.dimensions["skill_relevance"], "positive")
+        self.assertEqual(mixed.dimensions["first_action_quality"], "negative")
+        self.assertFalse(mixed.adjust_seed_skill_strength)
+        self.assertFalse(mixed.adjust_durable_skill_strength)
 
     def test_feedback_classifier_uses_model_for_complex_feedback(self):
         from codex_memory.feedback_classifier import RuntimeSkillFeedbackClassifier

@@ -2,7 +2,7 @@
 
 Codex Memory turns clean long-term memory and trusted seed skills into task-specific Runtime Skills for Codex, then observes outcomes to improve future skill selection. For engineering work, it also guards workflows against missing inspection, missing verification, and false completion claims.
 
-This is a local developer alpha. It is intended for developers who can inspect local Codex configuration and recover their own environment. It does not guarantee compatibility across Codex CLI versions and is not recommended for sensitive production environments.
+This is a local developer beta for local Codex use. It is intended for developers who can inspect local Codex configuration and recover their own environment. It does not guarantee compatibility across Codex CLI versions and is not recommended for sensitive production environments.
 
 ## Runtime
 
@@ -19,7 +19,7 @@ The local SQLite Ledger is the only runtime store and source of truth.
 
 The runtime observes Codex tool use; it does not execute shell commands, edit files, or run tests by itself.
 
-Current Runtime MVP supports runtime skill generation from clean long-term memory, seed skill cold start, runtime skill injection audit, observed engineering workflows, task start, turn-bound workflow matching, repository inspection, code change detection, verification detection, Stop-time violation checks, next-turn control injection, verification recipe learning, dynamic skill candidate synthesis, and verification recipe reuse feedback. Legacy `workflow-execute` remains as a deprecated alias for experimental `workflow-simulate`; neither command is the runtime execution path.
+Current Runtime Skill beta supports runtime skill generation from clean long-term memory, active durable skills, seed skill cold start, runtime skill injection audit, observed engineering workflows, task start, turn-bound workflow matching, repository inspection, code change detection, verification detection, Stop-time violation checks, next-turn control injection, verification recipe learning, dynamic skill candidate synthesis, and verification recipe reuse feedback. Legacy `workflow-execute` remains as a deprecated alias for experimental `workflow-simulate`; neither command is the runtime execution path.
 
 The runtime observer is enabled by default. Disable it with `CODEX_MEMORY_ENABLE_RUNTIME_OBSERVER=0` if you only want reviewed memory storage without workflow guard behavior.
 
@@ -60,7 +60,7 @@ Runtime Skill classification and synthesis use a shorter model timeout than dura
 
 ## Support Matrix
 
-This alpha is tested for local developer use with:
+This beta is tested for local developer use with:
 
 - Python 3.9 or newer.
 - SQLite through Python's standard `sqlite3` module.
@@ -274,7 +274,7 @@ The legacy `CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS=1` enables all three groups 
 
 ## Experimental CLI
 
-The public alpha command surface is focused on local memory, runtime skills, and observed runtime guardrails: `status`, `runtime-status`, `runtime-benchmark`, `doctor`, `ingest`, `search`, `queue`, `runtime-skills`, `seed-skills`, `dynamic-skills`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
+The public beta command surface is focused on local memory, runtime skills, and observed runtime guardrails: `status`, `runtime-status`, `runtime-benchmark`, `doctor`, `ingest`, `search`, `queue`, `runtime-skills`, `seed-skills`, `dynamic-skills`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
 
 Experimental cognitive, knowledge, skill, and workflow commands are hidden behind an explicit environment switch:
 

@@ -43,7 +43,7 @@ class RuntimeSkillFeedbackClassifier:
             return self._model_classify(text, None) if self._should_call_model(text, None) else None
         outcome = "mixed" if positive and negative else "positive" if positive else "negative"
         target = _target(text)
-        dimensions = _dimensions(outcome, target)
+        dimensions = _mixed_dimensions(text, target) if outcome == "mixed" else _dimensions(outcome, target)
         adjust_seed = target in {"seed_skill", "skill_strategy", "first_action"} and outcome in {"positive", "negative"}
         adjust_durable = target in {"durable_skill", "skill_strategy", "first_action", "execution"} and outcome in {"positive", "negative"}
         if target == "memory_basis":
@@ -188,6 +188,21 @@ def _dimensions(outcome: str, target: str) -> dict[str, str]:
         dims["skill_relevance"] = value
     if target == "final_result" or outcome in {"positive", "negative", "mixed"}:
         dims["final_result_quality"] = value if target == "final_result" else dims["final_result_quality"]
+    return dims
+
+
+def _mixed_dimensions(text: str, target: str) -> dict[str, str]:
+    dims = _dimensions("mixed", target)
+    if _has_any(text, ("方向", "策略", "方法", "流程", "workflow", "strategy")) and _has_positive(text):
+        dims["skill_relevance"] = "positive"
+    if _has_any(text, ("提问", "问题", "question", "clarify", "澄清", "first action", "先问")) and _has_any(text, _NEGATIVE):
+        dims["first_action_quality"] = "negative"
+    if _has_any(text, ("偏好", "记忆", "memory", "不是我的偏好", "组织定位")) and _has_any(text, _NEGATIVE):
+        dims["memory_basis_quality"] = "negative"
+    if _has_any(text, ("模板", "agent", "seed", "种子")) and _has_any(text, _NEGATIVE):
+        dims["seed_skill_quality"] = "negative"
+    if _has_any(text, ("durable", "dynamic", "长期技能", "持久技能", "持久")) and _has_any(text, _NEGATIVE):
+        dims["durable_skill_quality"] = "negative"
     return dims
 
 

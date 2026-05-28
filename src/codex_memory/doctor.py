@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, plugin_manager
+from .benchmark import DEFAULT_BENCHMARK_FIXTURE
 from .config import Config, ensure_state_dir
 from .ledger import Ledger
 from .model_client import CodexMiniClient
@@ -26,6 +27,7 @@ def run_doctor(config: Config, model_check: bool = False, privacy: bool = False)
         "state_dir": _check_state_dir(config),
         "sqlite_ledger": _check_sqlite_ledger(config),
         "schema_migrations": _check_schema_migrations(config),
+        "runtime_skill_governance": _check_runtime_skill_governance(config),
         "codex_cli": _check_codex_cli(),
         "installed_plugin": _check_installed_plugin(),
         "raw_event_storage": _check_raw_event_storage(config),
@@ -111,6 +113,48 @@ def _check_schema_migrations(config: Config) -> dict[str, Any]:
         )
     except Exception as exc:
         return _result("warn", False, error=str(exc), fix_hint="Check Ledger permissions and schema_migrations integrity.")
+
+
+def _check_runtime_skill_governance(config: Config) -> dict[str, Any]:
+    try:
+        ledger = Ledger(config.ledger_path)
+        try:
+            migration = ledger.runtime_skill_governance_migration_status()
+            records = ledger.list_cognitive_records(limit=5000)
+        finally:
+            ledger.close()
+        runtime_injection_count = 0
+        runtime_feedback_count = 0
+        seed_status: dict[str, int] = {}
+        dynamic_status: dict[str, int] = {}
+        for record in records:
+            if record.get("layer") == "runtime_skill" and record.get("record_type") == "injection":
+                runtime_injection_count += 1
+            if record.get("layer") == "runtime_skill" and record.get("record_type") == "feedback":
+                runtime_feedback_count += 1
+            if record.get("record_type") == "seed_skill":
+                status = str(record.get("status") or "unknown")
+                seed_status[status] = seed_status.get(status, 0) + 1
+            if record.get("record_type") == "dynamic_skill":
+                status = str(record.get("status") or "unknown")
+                dynamic_status[status] = dynamic_status.get(status, 0) + 1
+        benchmark_available = DEFAULT_BENCHMARK_FIXTURE.is_file()
+        ok = bool(migration.get("ok")) and benchmark_available
+        return _result(
+            "warn",
+            ok,
+            migration=migration,
+            legacy_runtime_skill_records=migration.get("legacy_runtime_skill_records"),
+            seed_status_trust_conflicts=migration.get("seed_status_trust_conflicts"),
+            runtime_skill_records={"injection_count": runtime_injection_count, "feedback_count": runtime_feedback_count},
+            seed_skill_status=seed_status,
+            dynamic_skill_status=dynamic_status,
+            benchmark={"available": benchmark_available, "fixture_path": str(DEFAULT_BENCHMARK_FIXTURE), "can_run": benchmark_available},
+            strict_privacy=config.strict_privacy,
+            fix_hint="Open the Ledger with the current codex-memory version and ensure benchmarks/runtime_skill/tasks.jsonl is present.",
+        )
+    except Exception as exc:
+        return _result("warn", False, error=str(exc), fix_hint="Check Ledger permissions and runtime skill governance records.")
 
 
 def _check_codex_cli() -> dict[str, Any]:

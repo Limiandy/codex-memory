@@ -40,8 +40,10 @@ class McpTest(unittest.TestCase):
                 self.assertIn("codex_memory_runtime_violations", names)
                 self.assertIn("codex_memory_verification_recipes", names)
                 self.assertIn("codex_memory_runtime_skills", names)
+                self.assertIn("codex_memory_runtime_skill_audit", names)
                 self.assertIn("codex_memory_runtime_skill_feedback", names)
                 self.assertIn("codex_memory_seed_skills", names)
+                self.assertIn("codex_memory_seed_skill_stats", names)
                 self.assertIn("codex_memory_dynamic_skills", names)
                 self.assertIn("codex_memory_promote_dynamic_skill", names)
                 self.assertIn("codex_memory_disable_seed_skill", names)
@@ -112,6 +114,18 @@ class McpTest(unittest.TestCase):
                         "method": "tools/call",
                         "params": {"name": "codex_memory_dynamic_skill_stats", "arguments": {}},
                     },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 7,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_runtime_skill_audit", "arguments": {}},
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 8,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_seed_skill_stats", "arguments": {}},
+                    },
                 ]
                 for call in calls:
                     proc.stdin.write(json.dumps(call) + "\n")
@@ -122,11 +136,15 @@ class McpTest(unittest.TestCase):
                 runtime_status = json.loads(proc.stdout.readline())
                 recipes = json.loads(proc.stdout.readline())
                 dynamic_stats = json.loads(proc.stdout.readline())
+                runtime_audit = json.loads(proc.stdout.readline())
+                seed_stats = json.loads(proc.stdout.readline())
                 status_text = json.loads(status["result"]["content"][0]["text"])
                 queue_text = json.loads(queue["result"]["content"][0]["text"])
                 runtime_status_text = json.loads(runtime_status["result"]["content"][0]["text"])
                 recipes_text = json.loads(recipes["result"]["content"][0]["text"])
                 dynamic_stats_text = json.loads(dynamic_stats["result"]["content"][0]["text"])
+                runtime_audit_text = json.loads(runtime_audit["result"]["content"][0]["text"])
+                seed_stats_text = json.loads(seed_stats["result"]["content"][0]["text"])
                 self.assertEqual(status_text["store"]["primary"], "ledger")
                 self.assertFalse(status_text["privacy"]["store_raw_events"])
                 self.assertTrue(status_text["privacy"]["runtime_observer_enabled"])
@@ -134,6 +152,9 @@ class McpTest(unittest.TestCase):
                 self.assertIn("active_workflow", runtime_status_text)
                 self.assertEqual(recipes_text, [])
                 self.assertIn("by_status", dynamic_stats_text)
+                self.assertIn("recent_candidates", dynamic_stats_text)
+                self.assertIn("injection_count", runtime_audit_text)
+                self.assertIn("by_trust_state", seed_stats_text)
                 self.assertTrue((Path(tmp) / "ledger.sqlite3").exists())
             finally:
                 for stream in (proc.stdin, proc.stdout, proc.stderr):

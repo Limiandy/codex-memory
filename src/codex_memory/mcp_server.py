@@ -160,6 +160,10 @@ TOOLS = {
         "description": "List Runtime Skill injections.",
         "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}},
     },
+    "codex_memory_runtime_skill_audit": {
+        "description": "Summarize Runtime Skill injections and feedback records.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     "codex_memory_runtime_skill_feedback": {
         "description": "Record explicit feedback for a Runtime Skill injection.",
         "inputSchema": {
@@ -176,6 +180,10 @@ TOOLS = {
     "codex_memory_seed_skills": {
         "description": "List seed skills and trust state.",
         "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "default": 20}}},
+    },
+    "codex_memory_seed_skill_stats": {
+        "description": "Summarize seed skill status, trust state, and feedback counters.",
+        "inputSchema": {"type": "object", "properties": {}},
     },
     "codex_memory_dynamic_skills": {
         "description": "List dynamic durable skill candidates or active skills.",
@@ -274,6 +282,7 @@ def main() -> int:
             )
         ),
         "codex_memory_runtime_skills": lambda args: _with_service(lambda service: service.list_runtime_skills(_limit(args.get("limit", 20)))),
+        "codex_memory_runtime_skill_audit": lambda args: _with_service(lambda service: service.runtime_skill_audit()),
         "codex_memory_runtime_skill_feedback": lambda args: _with_service(
             lambda service: service.runtime_skill_feedback(
                 _id_arg(args["injection_id"], "injection_id"),
@@ -283,6 +292,7 @@ def main() -> int:
             )
         ),
         "codex_memory_seed_skills": lambda args: _with_service(lambda service: service.list_seed_skills(_limit(args.get("limit", 20)))),
+        "codex_memory_seed_skill_stats": lambda args: _with_service(lambda service: service.seed_skill_stats()),
         "codex_memory_dynamic_skills": lambda args: _with_service(lambda service: service.list_dynamic_skills(status=args.get("status"), limit=_limit(args.get("limit", 20)))),
         "codex_memory_dynamic_skill_stats": lambda args: _with_service(lambda service: service.dynamic_skill_stats()),
         "codex_memory_promote_dynamic_skill": lambda args: _with_service(

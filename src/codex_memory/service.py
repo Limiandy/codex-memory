@@ -260,7 +260,7 @@ class MemoryService:
             basis_started = time.perf_counter()
             memory_basis = CleanMemoryRetriever(self.ledger).retrieve(prompt, cwd=cwd, session_id=session_id, limit=limit)
             memory_retrieval_latency_ms += _elapsed_ms(basis_started)
-            cache_key = _runtime_skill_cache_key(prompt, memory_basis)
+            cache_key = _runtime_skill_cache_key(prompt, memory_basis, model=self.config.model, strict_privacy=self.config.strict_privacy)
             cached = self._runtime_skill_cache.get(cache_key)
             if cached:
                 runtime_skill, review = cached
@@ -831,9 +831,11 @@ def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
 
-def _runtime_skill_cache_key(prompt: str, memory_basis: dict[str, Any]) -> str:
+def _runtime_skill_cache_key(prompt: str, memory_basis: dict[str, Any], model: str, strict_privacy: bool) -> str:
     basis = {
-        "prompt": prompt,
+        "prompt_sha256": hashlib.sha256(str(prompt or "").encode("utf-8", errors="replace")).hexdigest(),
+        "model": model,
+        "strict_privacy": bool(strict_privacy),
         "memories": [_basis_cache_marker(item, include_trust=False) for item in memory_basis.get("memories") or []],
         "durable_skills": [_basis_cache_marker(item, include_trust=True) for item in memory_basis.get("durable_skills") or []],
         "seed_skills": [_basis_cache_marker(item, include_trust=True) for item in memory_basis.get("seed_skills") or []],
@@ -857,6 +859,8 @@ def _basis_cache_marker(item: dict[str, Any], include_trust: bool) -> dict[str, 
         "id": str(item.get("id")),
         "updated_at": item.get("updated_at"),
         "status": item.get("status"),
+        "confidence": item.get("confidence"),
+        "importance": item.get("importance"),
         "strength": item.get("strength"),
     }
     if include_trust:

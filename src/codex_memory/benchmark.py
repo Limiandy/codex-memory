@@ -14,7 +14,11 @@ DEFAULT_THRESHOLDS = {
     "direct_answer_skip_accuracy": 0.95,
     "skill_trigger_precision": 0.90,
     "skill_trigger_recall": 0.90,
+    "intent_accuracy": 0.85,
+    "domain_accuracy": 0.85,
+    "clarification_accuracy": 0.85,
     "feedback_attribution_accuracy": 0.85,
+    "feedback_dimension_accuracy": 0.85,
     "seed_adjustment_accuracy": 0.90,
     "durable_adjustment_accuracy": 0.90,
 }
