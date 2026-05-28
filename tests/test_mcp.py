@@ -114,6 +114,8 @@ class McpTest(unittest.TestCase):
                 runtime_status_text = json.loads(runtime_status["result"]["content"][0]["text"])
                 recipes_text = json.loads(recipes["result"]["content"][0]["text"])
                 self.assertEqual(status_text["store"]["primary"], "ledger")
+                self.assertFalse(status_text["privacy"]["store_raw_events"])
+                self.assertTrue(status_text["privacy"]["runtime_observer_enabled"])
                 self.assertEqual(queue_text, [])
                 self.assertIn("active_workflow", runtime_status_text)
                 self.assertEqual(recipes_text, [])

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -24,7 +27,7 @@ class ToolObservation:
         return asdict(self)
 
 
-def normalize_tool_observation(payload: dict[str, Any]) -> ToolObservation:
+def normalize_tool_observation(payload: dict[str, Any], rules: dict[str, list[str]] | None = None) -> ToolObservation:
     source_fields: dict[str, str] = {}
     tool_name = _tool_name(payload, source_fields)
     command = _command_text(payload, source_fields)
@@ -35,7 +38,9 @@ def normalize_tool_observation(payload: dict[str, Any]) -> ToolObservation:
         source_fields["exit_code"] = exit_code_source
     files_changed = _files_changed(payload, source_fields)
     text = _payload_text(payload)
+    rules = rules if rules is not None else load_observation_rules(payload.get("cwd"))
     tool_kind, confidence, raw_kind_reason = _tool_kind(tool_name, command, text)
+    tool_kind, confidence, raw_kind_reason = _apply_custom_rules(tool_kind, confidence, raw_kind_reason, tool_name, command, text, rules)
     return ToolObservation(
         schema_version=1,
         tool_name=tool_name,
@@ -54,6 +59,67 @@ def normalize_tool_observation(payload: dict[str, Any]) -> ToolObservation:
             "failed": _looks_failed(text, exit_code),
         },
     )
+
+
+def load_observation_rules(cwd: Any = None) -> dict[str, list[str]]:
+    rules = {"verify": [], "inspect": [], "edit": []}
+    env_map = {
+        "verify": "CODEX_MEMORY_VERIFY_COMMANDS",
+        "inspect": "CODEX_MEMORY_INSPECT_COMMANDS",
+        "edit": "CODEX_MEMORY_EDIT_COMMANDS",
+    }
+    for key, env_name in env_map.items():
+        rules[key].extend(_split_rule_text(os.environ.get(env_name, "")))
+    config = _load_rules_file(cwd)
+    for key in rules:
+        value = config.get(f"{key}_commands") or config.get(key)
+        if isinstance(value, list):
+            rules[key].extend(str(item).strip().lower() for item in value if str(item).strip())
+        elif isinstance(value, str):
+            rules[key].extend(_split_rule_text(value))
+    return {key: sorted(set(item for item in values if item)) for key, values in rules.items()}
+
+
+def _load_rules_file(cwd: Any) -> dict[str, Any]:
+    if not cwd:
+        return {}
+    path = Path(str(cwd)).expanduser() / ".codex-memory.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    runtime = data.get("runtime_observer") if isinstance(data, dict) else {}
+    if isinstance(runtime, dict):
+        return runtime
+    return data if isinstance(data, dict) else {}
+
+
+def _split_rule_text(text: str) -> list[str]:
+    return [part.strip().lower() for part in text.replace("\n", ",").split(",") if part.strip()]
+
+
+def _apply_custom_rules(
+    tool_kind: str,
+    confidence: float,
+    raw_kind_reason: str,
+    tool_name: str,
+    command: str,
+    text: str,
+    rules: dict[str, list[str]],
+) -> tuple[str, float, str]:
+    tool_and_command = " ".join((tool_name, command)).lower()
+    lowered = " ".join((tool_name, command, text)).lower()
+    for kind in ("edit", "verify", "inspect"):
+        for signal in rules.get(kind, []):
+            if signal and signal in tool_and_command:
+                return kind, 0.92, f"matched custom {kind} signal: {signal}"
+    for kind in ("edit", "verify", "inspect"):
+        for signal in rules.get(kind, []):
+            if signal and signal in lowered:
+                return kind, max(confidence, 0.64), f"matched weak custom {kind} signal from payload text: {signal}"
+    return tool_kind, confidence, raw_kind_reason
 
 
 def _tool_kind(tool_name: str, command: str, text: str) -> tuple[str, float, str]:

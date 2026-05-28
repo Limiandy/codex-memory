@@ -1,4 +1,7 @@
 import unittest
+import os
+import tempfile
+from pathlib import Path
 
 from codex_memory.observation import normalize_tool_observation
 
@@ -57,6 +60,31 @@ class ToolObservationNormalizerTest(unittest.TestCase):
         self.assertEqual(observation.tool_kind, "verify")
         self.assertLess(observation.confidence, 0.8)
         self.assertNotIn("command", observation.source_fields)
+
+    def test_custom_verify_command_from_env(self):
+        previous = os.environ.get("CODEX_MEMORY_VERIFY_COMMANDS")
+        os.environ["CODEX_MEMORY_VERIFY_COMMANDS"] = "make verify,tox"
+        try:
+            observation = normalize_tool_observation({"tool_name": "functions.exec_command", "cmd": "make verify"})
+            self.assertEqual(observation.tool_kind, "verify")
+            self.assertGreaterEqual(observation.confidence, 0.9)
+            self.assertIn("custom verify", observation.raw_kind_reason)
+        finally:
+            if previous is None:
+                os.environ.pop("CODEX_MEMORY_VERIFY_COMMANDS", None)
+            else:
+                os.environ["CODEX_MEMORY_VERIFY_COMMANDS"] = previous
+
+    def test_custom_rules_from_project_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".codex-memory.json").write_text(
+                '{"runtime_observer": {"verify_commands": ["pnpm check"], "inspect_commands": ["fd "]}}',
+                encoding="utf-8",
+            )
+            verify = normalize_tool_observation({"tool_name": "functions.exec_command", "cmd": "pnpm check", "cwd": tmp})
+            inspect = normalize_tool_observation({"tool_name": "functions.exec_command", "cmd": "fd runtime src", "cwd": tmp})
+            self.assertEqual(verify.tool_kind, "verify")
+            self.assertEqual(inspect.tool_kind, "inspect")
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from .schema import STATUSES
 
 TOOLS = {
     "codex_memory_status": {
-        "description": "Show lightweight Codex Memory ledger status.",
+        "description": "Show lightweight Codex Memory ledger, store, and privacy status.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     "codex_memory_search": {
@@ -247,6 +247,11 @@ def _status(config, ledger: Ledger) -> dict[str, Any]:
         "ledger": ledger.stats(),
         "model": config.model,
         "store": {"primary": "ledger", "external_mirror": "unsupported"},
+        "privacy": {
+            "store_raw_events": config.store_raw_events,
+            "runtime_observer_enabled": config.enable_runtime_observer,
+            "runtime_observation_previews": "stored" if config.store_runtime_observation_previews else "redacted",
+        },
     }
 
 

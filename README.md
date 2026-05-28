@@ -111,6 +111,26 @@ Stop: final answer with verification evidence -> audit_outcome
 
 If code was changed without verification, the next turn receives a Runtime control warning. If a learned verification recipe is recommended and then reused, the recipe records reuse, success/failure, command source, exit code, and strength adjustment.
 
+Project-specific workflow detection can be tuned with environment variables or a local `.codex-memory.json` file:
+
+```bash
+CODEX_MEMORY_VERIFY_COMMANDS="make verify,tox,pnpm check" ./scripts/codex-memory runtime-status
+CODEX_MEMORY_INSPECT_COMMANDS="fd ,git show" ./scripts/codex-memory runtime-status
+CODEX_MEMORY_EDIT_COMMANDS="apply_patch,write_file" ./scripts/codex-memory runtime-status
+```
+
+Example `.codex-memory.json`:
+
+```json
+{
+  "runtime_observer": {
+    "verify_commands": ["make verify", "tox", "pnpm check"],
+    "inspect_commands": ["fd ", "git show"],
+    "edit_commands": ["apply_patch", "write_file"]
+  }
+}
+```
+
 ## Uninstall
 
 Disable the plugin but keep files:
@@ -186,7 +206,7 @@ The legacy `CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS=1` enables all three groups 
 
 ## Experimental CLI
 
-The public alpha command surface is focused on local memory: `status`, `doctor`, `ingest`, `search`, `queue`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `plugin`, `govern`, and `govern-periodic`.
+The public alpha command surface is focused on local memory and observed runtime guardrails: `status`, `runtime-status`, `doctor`, `ingest`, `search`, `queue`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
 
 Experimental cognitive, knowledge, skill, and workflow commands are hidden behind an explicit environment switch:
 
