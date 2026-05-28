@@ -4,9 +4,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from codex_memory.config import Config
+from codex_memory.hooks import _session_start
 from codex_memory.schema import Evidence, MemoryCandidate
 from codex_memory.service import MemoryService
 
@@ -155,6 +158,38 @@ class RuntimeTraceTest(unittest.TestCase):
                 self.assertIn("workflow_step_completed", names)
                 self.assertIn("workflow_stop_audited", names)
                 self.assertIn("runtime_skill_feedback_recorded", names)
+                self.assertIn("verification_recipe_learned", names)
+                self.assertIn("dynamic_skill_candidate_created", names)
+            finally:
+                service.close()
+
+    def test_user_message_memory_extraction_is_traced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MemoryService(_config(tmp, enable_feedback_model=False))
+            try:
+                payload = {"prompt": "默认使用中文回答", "cwd": tmp, "session_id": "s1", "turn_id": "t1"}
+                event_id = service.record_event("user_message", payload)
+                trace = service.start_trace_from_payload(payload, event_id=event_id)
+                result = service.process_event_id(event_id)
+                self.assertEqual(result["candidate_count"], 1)
+                events = service.trace_events(trace.trace_id)
+                names = {event["name"] for event in events}
+                self.assertIn("memory_extraction_started", names)
+                self.assertIn("memory_candidates_extracted", names)
+                self.assertIn("memory_candidate_reviewed", names)
+                self.assertIn("memory_candidate_stored", names)
+                links = service.ledger.list_trace_links(trace.trace_id)
+                self.assertTrue(any(link["target_type"] == "memory" and link["relation"] == "created" for link in links))
+            finally:
+                service.close()
+
+    def test_session_start_does_not_create_user_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MemoryService(_config(tmp, enable_feedback_model=False))
+            try:
+                with redirect_stdout(StringIO()):
+                    _session_start(service, {"cwd": tmp, "session_id": "s1", "turn_id": "t0"})
+                self.assertEqual(service.list_traces(), [])
             finally:
                 service.close()
 

@@ -66,12 +66,20 @@ class MemoryService:
     def process_event(self, event_id: str, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         logger.info("process event started", event_id=event_id, event_type=event_type, payload_summary=summarize_payload(payload))
         self.runtime.begin_event(event_id, event_type, payload)
+        trace = self._existing_trace_for_payload(payload)
+        extraction_span = None
+        if trace:
+            extraction_span = self.monitor.start_span(trace, "memory_extraction", metadata={"event_id": event_id, "event_type": event_type})
+            self.monitor.event(trace, "memory_extraction_started", span_id=str(extraction_span["id"]), subject_type="event", subject_id=event_id, metadata={"event_type": event_type})
         if event_type == "user_message":
             prompt = str(payload.get("prompt") or payload.get("text") or "")
             if _memory_storage_opt_out(prompt):
                 result = {"event_id": event_id, "candidate_count": 0, "results": [], "skipped": "memory_storage_opt_out"}
                 self.ledger.mark_event_processed(event_id)
                 self.runtime.finish_event(event_id, result)
+                if trace:
+                    self.monitor.event(trace, "memory_extraction_skipped", span_id=str(extraction_span["id"]) if extraction_span else None, metadata={"reason": "memory_storage_opt_out"})
+                    self.monitor.end_span(str(extraction_span["id"]) if extraction_span else None, status="skipped")
                 logger.info("memory extraction skipped by user opt-out", event_id=event_id)
                 return result
             feedback = self.apply_natural_feedback(
@@ -83,6 +91,13 @@ class MemoryService:
                 logger.info("natural memory feedback applied", event_id=event_id, feedback=feedback)
         candidates = self.engine.extract(event_type, payload)
         logger.debug("memory candidates extracted", event_id=event_id, candidate_count=len(candidates), candidates=[summarize_candidate(candidate) for candidate in candidates])
+        if trace:
+            self.monitor.event(
+                trace,
+                "memory_candidates_extracted",
+                span_id=str(extraction_span["id"]) if extraction_span else None,
+                metadata={"candidate_count": len(candidates), "candidate_types": [candidate.memory_type for candidate in candidates]},
+            )
         results = []
         active_memory_ids = []
         project_key = project_key_for_cwd(str(payload.get("cwd") or "")) if payload.get("cwd") else None
@@ -105,6 +120,23 @@ class MemoryService:
                     memory_id = self.ledger.add_candidate(candidate, "superseded", review, project_key=project_key, session_id=session_id)
                     self.runtime.sync_memory(memory_id)
                     self.ledger.add_review_feedback(str(local_duplicates[0]["id"]), "merge_duplicate", f"merged {memory_id}")
+                    if trace:
+                        self.monitor.event(
+                            trace,
+                            "memory_candidate_reviewed",
+                            span_id=str(extraction_span["id"]) if extraction_span else None,
+                            metadata={"status": "superseded", "memory_type": candidate.memory_type, "reasons": review.get("reasons") or []},
+                        )
+                        self.monitor.event(
+                            trace,
+                            "memory_candidate_stored",
+                            span_id=str(extraction_span["id"]) if extraction_span else None,
+                            subject_type="memory",
+                            subject_id=memory_id,
+                            metadata={"status": "superseded", "memory_type": candidate.memory_type, "scope": candidate.scope},
+                        )
+                        self.monitor.link(trace, "memory", memory_id, "created")
+                        self.monitor.link(trace, "memory", str(local_duplicates[0]["id"]), "used", {"relation": "duplicate_source"})
                     results.append(
                         {
                             "id": memory_id,
@@ -149,8 +181,25 @@ class MemoryService:
                     }
                 status = review["status"]
                 logger.debug("review completed", event_id=event_id, candidate=summarize_candidate(candidate), review_status=status, reasons=review.get("reasons", []))
+                if trace:
+                    self.monitor.event(
+                        trace,
+                        "memory_candidate_reviewed",
+                        span_id=str(extraction_span["id"]) if extraction_span else None,
+                        metadata={"status": status, "memory_type": candidate.memory_type, "reasons": review.get("reasons") or [], "risk_flags": review.get("risk_flags") or []},
+                    )
                 memory_id = self.ledger.add_candidate(candidate, status, review, project_key=project_key, session_id=session_id)
                 self.runtime.sync_memory(memory_id)
+                if trace:
+                    self.monitor.event(
+                        trace,
+                        "memory_candidate_stored",
+                        span_id=str(extraction_span["id"]) if extraction_span else None,
+                        subject_type="memory",
+                        subject_id=memory_id,
+                        metadata={"status": status, "memory_type": candidate.memory_type, "scope": candidate.scope},
+                    )
+                    self.monitor.link(trace, "memory", memory_id, "created")
                 if status == "active":
                     self.ledger.set_status(memory_id, "active", {**review, "storage": "ledger_only"})
                     self.runtime.sync_memory(memory_id)
@@ -165,6 +214,17 @@ class MemoryService:
             consolidated = self.consolidate_memories()
             if consolidated.get("created_count"):
                 logger.info("memory consolidation completed", event_id=event_id, result=consolidated)
+            if trace:
+                self.monitor.event(
+                    trace,
+                    "memory_consolidation_completed",
+                    span_id=str(extraction_span["id"]) if extraction_span else None,
+                    metadata={"created_count": consolidated.get("created_count", 0), "created": consolidated.get("created") or []},
+                )
+                for item in consolidated.get("created") or []:
+                    self.monitor.link(trace, "memory", str(item.get("id")), "created", {"kind": item.get("kind"), "source_ids": item.get("source_ids") or []})
+        if trace:
+            self.monitor.end_span(str(extraction_span["id"]) if extraction_span else None, metadata={"candidate_count": len(candidates), "result_count": len(results)})
         logger.info("process event finished", event_id=event_id, candidate_count=len(candidates), result_count=len(results))
         return result
 
@@ -192,6 +252,24 @@ class MemoryService:
             self.ledger.mark_event_processed(event_id)
         logger.debug("event recorded", event_id=event_id, event_type=event_type, processed=processed, payload_summary=summarize_payload(payload))
         return event_id
+
+    def _existing_trace_for_payload(self, payload: dict[str, Any]) -> TraceContext | None:
+        trace_id = str(payload.get("_codex_memory_trace_id") or "") or None
+        existing = self.monitor.get_trace(trace_id) if trace_id else None
+        if not existing:
+            existing = self.ledger.latest_trace(
+                session_id=str(payload.get("session_id") or "") or None,
+                turn_id=str(payload.get("turn_id") or "") or None,
+            )
+        if not existing:
+            return None
+        return TraceContext(
+            str(existing["id"]),
+            str(existing.get("session_id") or "") or None,
+            str(existing.get("turn_id") or "") or None,
+            str(existing.get("cwd") or payload.get("cwd") or "") or None,
+            str(existing.get("project_key") or "") or None,
+        )
 
     def start_trace_from_payload(self, payload: dict[str, Any], event_id: str | None = None) -> TraceContext:
         prompt = str(payload.get("prompt") or payload.get("text") or "")
@@ -609,6 +687,15 @@ class MemoryService:
             severity = (violation.get("metadata_json") or {}).get("severity") or "info"
             self.monitor.event(trace, "workflow_violation_detected", severity="error" if severity == "high" else "warn", subject_type="violation", subject_id=str(violation.get("id")), metadata={"violation_type": (violation.get("metadata_json") or {}).get("violation_type"), "severity": severity})
             self.monitor.link(trace, "violation", str(violation.get("id")), "violated")
+        learned = result.get("learned") or {}
+        recipe = learned.get("verification_recipe")
+        if recipe:
+            self.monitor.event(trace, "verification_recipe_learned", subject_type="verification_recipe", subject_id=str(recipe.get("id")), metadata={"workflow_id": workflow_id})
+            self.monitor.link(trace, "verification_recipe", str(recipe.get("id")), "created")
+        dynamic_skill = learned.get("dynamic_skill")
+        if dynamic_skill:
+            self.monitor.event(trace, "dynamic_skill_candidate_created", subject_type="dynamic_skill", subject_id=str(dynamic_skill.get("id")), metadata={"workflow_id": workflow_id, "status": dynamic_skill.get("status")})
+            self.monitor.link(trace, "dynamic_skill", str(dynamic_skill.get("id")), "created")
         if outcome == "failure":
             self.monitor.fail_trace(trace, final_outcome=outcome)
         else:

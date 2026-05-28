@@ -220,8 +220,10 @@ class CognitiveRuntime:
         if not violations and _step_completed(metadata, "audit_outcome"):
             self.transition("workflow", str(workflow["id"]), "completed", metadata={"runtime_kind": "observed_workflow"})
             self.ledger.set_cognitive_record_status(str(workflow["id"]), "completed", {"workflow_state": "completed"})
-            self._learn_from_successful_workflow(workflow)
-        return {"observed": True, "workflow_id": workflow["id"], "violations": violations, "hook_output": {}}
+            learned = self._learn_from_successful_workflow(workflow)
+        else:
+            learned = {}
+        return {"observed": True, "workflow_id": workflow["id"], "violations": violations, "learned": learned, "hook_output": {}}
 
     def match_observation_to_step(self, workflow: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_tool_observation(payload)
@@ -621,13 +623,13 @@ class CognitiveRuntime:
         skills.sort(key=lambda item: (float(item.get("strength") or 1), float(item.get("importance") or 0)), reverse=True)
         return skills[:limit]
 
-    def _learn_from_successful_workflow(self, workflow: dict[str, Any]) -> None:
+    def _learn_from_successful_workflow(self, workflow: dict[str, Any]) -> dict[str, Any]:
         metadata = workflow.get("metadata_json") or {}
         observations = metadata.get("observations") or []
         verify_observations = [item for item in observations if item.get("matched_step_id") == "execute_and_verify" and item.get("command")]
         recipe = [item.get("command") for item in verify_observations]
         if not recipe:
-            return
+            return {}
         latest_verify = verify_observations[-1]
         latest_summary = latest_verify.get("summary") or {}
         files_changed = sorted(
@@ -638,7 +640,7 @@ class CognitiveRuntime:
                 if path
             }
         )
-        self.ledger.record_cognitive_record(
+        recipe_record = self.ledger.record_cognitive_record(
             "skill",
             "verification_recipe",
             f"verification_recipe:{workflow['id']}",
@@ -669,7 +671,8 @@ class CognitiveRuntime:
             },
             source_kind="workflow_learning",
         )
-        SkillSynthesizer(self.ledger).synthesize_from_workflow(workflow)
+        dynamic_skill = SkillSynthesizer(self.ledger).synthesize_from_workflow(workflow)
+        return {"verification_recipe": recipe_record, "dynamic_skill": dynamic_skill}
 
     def _record_recipe_reuse(self, workflow: dict[str, Any], observation: dict[str, Any]) -> None:
         metadata = workflow.get("metadata_json") or {}
