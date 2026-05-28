@@ -153,6 +153,7 @@ class CodexMiniClient:
                     "applies_to": "brand logo and visual identity design requests",
                     "goal": "Clarify the brand brief before any logo generation.",
                     "memory_basis_ids": _fake_memory_ids(prompt),
+                    "seed_skill_ids": _fake_seed_skill_ids(prompt),
                     "strategy": [
                         "Do not generate the logo immediately.",
                         "Ask for brand name, industry or product, target audience, logo type, colors, and forbidden elements.",
@@ -171,6 +172,7 @@ class CodexMiniClient:
                     "applies_to": "bug fixes, code changes, refactors, and implementation tasks",
                     "goal": "Complete the engineering task through inspection, minimal change, and verification evidence.",
                     "memory_basis_ids": _fake_memory_ids(prompt),
+                    "seed_skill_ids": _fake_seed_skill_ids(prompt),
                     "strategy": [
                         "Inspect the relevant repository context before editing.",
                         "Make the smallest focused change that satisfies the task.",
@@ -185,6 +187,7 @@ class CodexMiniClient:
                 "applies_to": "multi-step task requiring remembered preferences or project context",
                 "goal": "Use clean memory basis to choose a task-specific strategy before acting.",
                 "memory_basis_ids": _fake_memory_ids(prompt),
+                "seed_skill_ids": _fake_seed_skill_ids(prompt),
                 "strategy": ["Use only the supplied memory basis.", "Ask for clarification when required information is missing."],
                 "first_action": {"type": "proceed_or_clarify", "questions": []},
                 "avoid": ["Do not invent missing facts."],
@@ -236,3 +239,9 @@ def _fake_memory_ids(prompt: str) -> list[str]:
     import re
 
     return list(dict.fromkeys(re.findall(r"mem_[a-zA-Z0-9]+", prompt)))[:8]
+
+
+def _fake_seed_skill_ids(prompt: str) -> list[str]:
+    import re
+
+    return list(dict.fromkeys(re.findall(r"agency-agents:[A-Za-z0-9_./-]+", prompt)))[:8]

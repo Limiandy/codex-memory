@@ -33,6 +33,7 @@ The runtime observer is enabled by default. Disable it with `CODEX_MEMORY_ENABLE
 ./scripts/codex-memory ingest "默认使用中文回答"
 ./scripts/codex-memory search "中文回答偏好"
 ./scripts/codex-memory queue --status quarantined
+./scripts/codex-memory seed-skills --dry-run
 ./scripts/codex-memory export --output ~/codex-memory-export.json
 ./scripts/codex-memory prune-runtime
 ```
@@ -133,6 +134,17 @@ Example `.codex-memory.json`:
 }
 ```
 
+Seed skills can be imported to provide a cold-start skill basis before the local Ledger has enough user-specific memories:
+
+```bash
+./scripts/codex-memory seed-skills --dry-run
+./scripts/codex-memory seed-skills
+```
+
+By default this imports agent skill markdown from [`msitarzewski/agency-agents`](https://github.com/msitarzewski/agency-agents) on demand and records each entry as a local `seed_skill` cognitive record with source path, commit, and MIT license metadata. The source content is not vendored into this repository. Use `--source /path/to/agency-agents` for an already cloned checkout, `--category design` to import one category, and `--limit N` for a smaller trial import.
+
+Seed skills are a bootstrap layer, not a replacement for personal memory. Runtime Skill generation can use them when long-term memories are still empty; as reviewed memories, successful workflows, and user feedback accumulate, user-specific memories and durable skills should become the stronger basis.
+
 ## Uninstall
 
 Disable the plugin but keep files:
@@ -208,7 +220,7 @@ The legacy `CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS=1` enables all three groups 
 
 ## Experimental CLI
 
-The public alpha command surface is focused on local memory and observed runtime guardrails: `status`, `runtime-status`, `doctor`, `ingest`, `search`, `queue`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
+The public alpha command surface is focused on local memory, runtime skills, and observed runtime guardrails: `status`, `runtime-status`, `doctor`, `ingest`, `search`, `queue`, `seed-skills`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
 
 Experimental cognitive, knowledge, skill, and workflow commands are hidden behind an explicit environment switch:
 

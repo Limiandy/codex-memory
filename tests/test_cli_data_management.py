@@ -7,6 +7,33 @@ import unittest
 from pathlib import Path
 
 
+def _write_seed_source(root: Path):
+    (root / "design").mkdir(parents=True)
+    (root / "design" / "design-brand-guardian.md").write_text(
+        """---
+name: Brand Guardian
+description: Expert brand strategist for cohesive visual identity, logos, and brand systems.
+---
+# Brand Guardian
+
+Use brand context before producing logo directions.
+""",
+        encoding="utf-8",
+    )
+    (root / "engineering").mkdir(parents=True)
+    (root / "engineering" / "engineering-code-reviewer.md").write_text(
+        """---
+name: Code Reviewer
+description: Reviews code changes with attention to tests and maintainability.
+---
+# Code Reviewer
+
+Inspect code changes and verification gaps.
+""",
+        encoding="utf-8",
+    )
+
+
 class CliDataManagementTest(unittest.TestCase):
     def test_export_prune_and_wipe_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,6 +125,41 @@ class CliDataManagementTest(unittest.TestCase):
             )
             self.assertEqual(wipe.returncode, 0, wipe.stderr)
             self.assertIn("wiped", json.loads(wipe.stdout))
+
+    def test_seed_skills_command_supports_dry_run_and_local_source(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source:
+            source_path = Path(source)
+            _write_seed_source(source_path)
+            env = {**os.environ, "PYTHONPATH": "src", "CODEX_MEMORY_STATE_DIR": tmp, "CODEX_MEMORY_FAKE_MODEL": "1"}
+
+            dry_run = subprocess.run(
+                [sys.executable, "-m", "codex_memory.cli", "seed-skills", "--source", str(source_path), "--limit", "1", "--dry-run"],
+                cwd=".",
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            dry_payload = json.loads(dry_run.stdout)
+            self.assertTrue(dry_payload["dry_run"])
+            self.assertEqual(dry_payload["skill_count"], 1)
+
+            seed = subprocess.run(
+                [sys.executable, "-m", "codex_memory.cli", "seed-skills", "--source", str(source_path), "--category", "design"],
+                cwd=".",
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            self.assertEqual(seed.returncode, 0, seed.stderr)
+            payload = json.loads(seed.stdout)
+            self.assertFalse(payload["dry_run"])
+            self.assertEqual(payload["skill_count"], 1)
+            self.assertEqual(payload["created"][0]["id"], "agency-agents:design/design-brand-guardian.md")
 
 
 if __name__ == "__main__":

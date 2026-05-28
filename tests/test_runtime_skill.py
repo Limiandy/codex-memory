@@ -39,6 +39,36 @@ def _candidate(content, memory_type="user_preference", scope="global"):
     )
 
 
+def _write_seed_source(root: Path):
+    (root / "design").mkdir(parents=True)
+    (root / "engineering").mkdir(parents=True)
+    (root / "LICENSE").write_text("MIT License\n", encoding="utf-8")
+    (root / "design" / "design-brand-guardian.md").write_text(
+        """---
+name: Brand Guardian
+description: Expert brand strategist for cohesive visual identity, logos, and brand systems.
+color: blue
+---
+# Brand Guardian Agent Personality
+
+Use brand context, logo constraints, visual identity, and audience fit before producing design directions.
+""",
+        encoding="utf-8",
+    )
+    (root / "engineering" / "engineering-code-reviewer.md").write_text(
+        """---
+name: Code Reviewer
+description: Reviews code changes with attention to defects, tests, and maintainability.
+color: green
+---
+# Code Reviewer Agent Personality
+
+Inspect code changes, check test coverage, and point out verification gaps.
+""",
+        encoding="utf-8",
+    )
+
+
 class RuntimeSkillTest(unittest.TestCase):
     def setUp(self):
         os.environ["CODEX_MEMORY_FAKE_MODEL"] = "1"
@@ -140,6 +170,24 @@ class RuntimeSkillTest(unittest.TestCase):
                 self.assertIn("极简", context)
                 self.assertIn("高端 B2B SaaS", context)
                 self.assertNotIn("Codex Memory context:", context)
+            finally:
+                service.close()
+
+    def test_seed_skills_provide_cold_start_basis_without_memories(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as source:
+            source_path = Path(source)
+            _write_seed_source(source_path)
+            service = _service(tmp)
+            try:
+                seeded = service.seed_skills(source=str(source_path))
+                self.assertEqual(seeded["skill_count"], 2)
+
+                context = service.prompt_context("帮我画一个品牌 logo", cwd=tmp, session_id="s1")
+
+                self.assertIn("Runtime Skill: brand_logo_design_intake", context)
+                self.assertIn("Seed skill basis:", context)
+                self.assertIn("Brand Guardian", context)
+                self.assertIn("No clean long-term memory matched", context)
             finally:
                 service.close()
 

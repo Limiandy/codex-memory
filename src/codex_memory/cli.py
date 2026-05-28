@@ -100,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
     prune_runtime = sub.add_parser("prune-runtime")
     prune_runtime.add_argument("--older-than-days", type=int, default=None)
     prune_runtime.add_argument("--include-recipes", action="store_true")
+    seed_skills = sub.add_parser("seed-skills")
+    seed_skills.add_argument("--source", default=None)
+    seed_skills.add_argument("--repo-url", default="https://github.com/msitarzewski/agency-agents.git")
+    seed_skills.add_argument("--limit", type=int, default=None)
+    seed_skills.add_argument("--category", default=None)
+    seed_skills.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("expire")
     sub.add_parser("reconcile")
@@ -222,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
             return _print(service.prune_events(older_than_days=args.older_than_days))
         if args.cmd == "prune-runtime":
             return _print(service.prune_runtime(older_than_days=args.older_than_days, include_recipes=args.include_recipes))
+        if args.cmd == "seed-skills":
+            return _print(service.seed_skills(source=args.source, repo_url=args.repo_url, limit=args.limit, category=args.category, dry_run=args.dry_run))
         if args.cmd == "expire":
             return _print(service.expire_due_memories())
         if args.cmd == "reconcile":

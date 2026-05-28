@@ -18,6 +18,7 @@ from .recall import MemoryRecall
 from .review import MemoryReviewer
 from .runtime_skill import RuntimeSkillInjector, RuntimeSkillSynthesizer
 from .security import sanitize_payload, summarize_payload, summarize_candidate
+from .seed_skills import AgencySkillSeeder, DEFAULT_AGENCY_AGENTS_REPO
 from .skill_need import SkillNeedClassifier
 from .skills import SkillEngine
 
@@ -304,6 +305,16 @@ class MemoryService:
 
     def skill_audit(self) -> dict[str, Any]:
         return SkillEngine(self.ledger).audit()
+
+    def seed_skills(
+        self,
+        source: str | None = None,
+        repo_url: str = DEFAULT_AGENCY_AGENTS_REPO,
+        limit: int | None = None,
+        category: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        return AgencySkillSeeder(self.ledger).seed(source=source, repo_url=repo_url, limit=limit, category=category, dry_run=dry_run)
 
     def skill_promote(self, skill_id: str) -> dict[str, Any] | None:
         return SkillEngine(self.ledger).promote(skill_id)

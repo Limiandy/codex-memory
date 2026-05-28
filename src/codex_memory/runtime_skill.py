@@ -17,6 +17,8 @@ class RuntimeSkill:
     memory_basis_summary: str
     strategy: list[str]
     first_action: dict[str, Any]
+    seed_skill_ids: list[str] = field(default_factory=list)
+    seed_skill_basis_summary: str = ""
     avoid: list[str] = field(default_factory=list)
     confidence: float = 0.0
     intent: str = ""
@@ -30,6 +32,8 @@ class RuntimeSkill:
             "goal": self.goal,
             "memory_basis_ids": self.memory_basis_ids,
             "memory_basis_summary": self.memory_basis_summary,
+            "seed_skill_ids": self.seed_skill_ids,
+            "seed_skill_basis_summary": self.seed_skill_basis_summary,
             "strategy": self.strategy,
             "first_action": self.first_action,
             "avoid": self.avoid,
@@ -47,13 +51,16 @@ class RuntimeSkillSynthesizer:
         if not decision.skill_needed:
             return None
         memories = memory_basis.get("memories") or []
+        seed_skills = memory_basis.get("seed_skills") or []
         basis_ids = [str(item.get("id")) for item in memories if item.get("id")]
         basis_summary = str(memory_basis.get("memory_basis_summary") or "")
+        seed_skill_ids = [str(item.get("id")) for item in seed_skills if item.get("id")]
+        seed_summary = str(memory_basis.get("seed_skill_basis_summary") or "")
         if self.model is not None:
-            modeled = self._model_synthesize(prompt, decision, memories, basis_ids, basis_summary)
+            modeled = self._model_synthesize(prompt, decision, memories, basis_ids, basis_summary, seed_skills, seed_skill_ids, seed_summary)
             if modeled:
                 return modeled
-        return self._fallback_synthesize(decision, basis_ids, basis_summary, memories)
+        return self._fallback_synthesize(decision, basis_ids, basis_summary, memories, seed_skill_ids, seed_summary)
 
     def _fallback_synthesize(
         self,
@@ -61,6 +68,8 @@ class RuntimeSkillSynthesizer:
         basis_ids: list[str],
         basis_summary: str,
         memories: list[dict[str, Any]],
+        seed_skill_ids: list[str],
+        seed_summary: str,
     ) -> RuntimeSkill:
         if decision.intent == "brand_logo_design":
             return RuntimeSkill(
@@ -69,6 +78,8 @@ class RuntimeSkillSynthesizer:
                 goal="Use clean long-term preferences to narrow the design brief before any image generation.",
                 memory_basis_ids=basis_ids,
                 memory_basis_summary=basis_summary,
+                seed_skill_ids=seed_skill_ids,
+                seed_skill_basis_summary=seed_summary,
                 strategy=[
                     "Do not generate the logo immediately.",
                     "First ask for brand name, industry or product, target audience, logo type, color or style constraints, and forbidden elements.",
@@ -99,6 +110,8 @@ class RuntimeSkillSynthesizer:
                 goal="Make code changes through inspected context, minimal edits, and explicit verification evidence.",
                 memory_basis_ids=basis_ids,
                 memory_basis_summary=basis_summary,
+                seed_skill_ids=seed_skill_ids,
+                seed_skill_basis_summary=seed_summary,
                 strategy=[
                     "Inspect the relevant repository context before editing.",
                     "Make the smallest focused change that satisfies the task.",
@@ -120,6 +133,8 @@ class RuntimeSkillSynthesizer:
             goal="Use clean long-term memory to choose a task-specific strategy before acting.",
             memory_basis_ids=basis_ids,
             memory_basis_summary=basis_summary,
+            seed_skill_ids=seed_skill_ids,
+            seed_skill_basis_summary=seed_summary,
             strategy=[
                 "Use only the memory basis listed below; do not invent missing user or organization facts.",
                 "Ask for clarification when required information is missing.",
@@ -139,6 +154,9 @@ class RuntimeSkillSynthesizer:
         memories: list[dict[str, Any]],
         basis_ids: list[str],
         basis_summary: str,
+        seed_skills: list[dict[str, Any]],
+        seed_skill_ids: list[str],
+        seed_summary: str,
     ) -> RuntimeSkill | None:
         prompt_text = (
             "Generate a Runtime Skill for the current Codex request. "
@@ -148,13 +166,15 @@ class RuntimeSkillSynthesizer:
             "Return concise JSON only.\n\n"
             f"User request:\n{redact_secrets(prompt)[:1200]}\n\n"
             f"Skill need decision:\n{decision.to_dict()}\n\n"
-            f"Allowed memory basis:\n{_memory_basis_for_model(memories)}"
+            f"Allowed memory basis:\n{_memory_basis_for_model(memories)}\n\n"
+            f"Allowed seed skills:\n{_seed_skills_for_model(seed_skills)}"
         )
         schema = {
             "name": "short_snake_case_name",
             "applies_to": "what current tasks this skill applies to",
             "goal": "one sentence",
             "memory_basis_ids": ["ids from allowed memory basis only"],
+            "seed_skill_ids": ["ids from allowed seed skills only"],
             "strategy": ["3-5 concise execution steps"],
             "first_action": {"type": "ask_clarifying_questions|inspect_repository|proceed_or_clarify", "questions": ["optional"]},
             "avoid": ["2-5 concise anti-patterns"],
@@ -166,7 +186,7 @@ class RuntimeSkillSynthesizer:
             return None
         if not isinstance(result, dict):
             return None
-        return _skill_from_model(result, decision, basis_ids, basis_summary)
+        return _skill_from_model(result, decision, basis_ids, basis_summary, seed_skill_ids, seed_summary)
 
 
 class RuntimeSkillInjector:
@@ -181,6 +201,9 @@ class RuntimeSkillInjector:
             "Memory basis:",
         ]
         lines.append("- " + skill.memory_basis_summary if skill.memory_basis_ids else "- No clean long-term memory matched; ask before assuming missing facts.")
+        if skill.seed_skill_ids:
+            lines.append("Seed skill basis:")
+            lines.append("- " + skill.seed_skill_basis_summary)
         lines.append("Execution:")
         for index, step in enumerate(skill.strategy, 1):
             lines.append(f"{index}. {step}")
@@ -216,11 +239,29 @@ def _memory_basis_for_model(memories: list[dict[str, Any]]) -> list[dict[str, An
     return basis
 
 
+def _seed_skills_for_model(seed_skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    basis = []
+    for skill in seed_skills[:5]:
+        metadata = skill.get("metadata_json") or {}
+        basis.append(
+            {
+                "id": skill.get("id"),
+                "name": metadata.get("name"),
+                "description": metadata.get("description"),
+                "category": metadata.get("category"),
+                "source_path": metadata.get("source_path"),
+            }
+        )
+    return basis
+
+
 def _skill_from_model(
     result: dict[str, Any],
     decision: SkillNeedDecision,
     allowed_basis_ids: list[str],
     basis_summary: str,
+    allowed_seed_skill_ids: list[str],
+    seed_summary: str,
 ) -> RuntimeSkill | None:
     name = _safe_identifier(str(result.get("name") or "memory_grounded_runtime_skill"))
     applies_to = _clean_text(result.get("applies_to"), 180)
@@ -229,6 +270,7 @@ def _skill_from_model(
     avoid = [_clean_text(item, 180) for item in result.get("avoid") or [] if _clean_text(item, 180)]
     first_action = result.get("first_action") if isinstance(result.get("first_action"), dict) else {}
     memory_basis_ids = [str(item) for item in result.get("memory_basis_ids") or [] if str(item) in set(allowed_basis_ids)]
+    seed_skill_ids = [str(item) for item in result.get("seed_skill_ids") or [] if str(item) in set(allowed_seed_skill_ids)]
     if not applies_to or not goal or len(strategy) < 2:
         return None
     if not first_action.get("type"):
@@ -249,6 +291,8 @@ def _skill_from_model(
         memory_basis_summary=basis_summary,
         strategy=strategy[:5],
         first_action=first_action,
+        seed_skill_ids=seed_skill_ids,
+        seed_skill_basis_summary=seed_summary,
         avoid=avoid[:5],
         confidence=max(0.0, min(1.0, confidence)),
         intent=decision.intent,
