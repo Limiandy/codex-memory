@@ -225,7 +225,7 @@ class MemoryService:
         runtime_skill_context = ""
         if skill_decision.skill_needed:
             memory_basis = CleanMemoryRetriever(self.ledger).retrieve(prompt, cwd=cwd, session_id=session_id, limit=limit)
-            runtime_skill = RuntimeSkillSynthesizer().synthesize(prompt, skill_decision, memory_basis)
+            runtime_skill = RuntimeSkillSynthesizer(self.model).synthesize(prompt, skill_decision, memory_basis)
             runtime_skill_context = RuntimeSkillInjector().format(runtime_skill)
         runtime_context = ""
         if self.config.enable_runtime_observer:

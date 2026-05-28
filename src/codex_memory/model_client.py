@@ -145,6 +145,51 @@ class CodexMiniClient:
                 "requires_clarification": False,
                 "reason": "fake classifier no skill",
             }
+        if "generate a runtime skill" in lowered:
+            target = lowered.split("user request:", 1)[-1]
+            if any(signal in target for signal in ("logo", "标志", "品牌", "视觉识别")):
+                return {
+                    "name": "brand_logo_design_intake",
+                    "applies_to": "brand logo and visual identity design requests",
+                    "goal": "Clarify the brand brief before any logo generation.",
+                    "memory_basis_ids": _fake_memory_ids(prompt),
+                    "strategy": [
+                        "Do not generate the logo immediately.",
+                        "Ask for brand name, industry or product, target audience, logo type, colors, and forbidden elements.",
+                        "Use the supplied memory basis to keep the direction minimal, professional, and restrained.",
+                    ],
+                    "first_action": {
+                        "type": "ask_clarifying_questions",
+                        "questions": ["品牌名称是什么？", "面向什么行业或产品？", "目标客户是谁？", "希望文字标、图形标还是组合标？"],
+                    },
+                    "avoid": ["Do not invent organization positioning.", "Do not use noisy gradients or cartoon style unless requested."],
+                    "confidence": 0.86,
+                }
+            if any(signal in target for signal in ("修复", "实现", "代码", "bug", "fix", "implement", "debug", "test")):
+                return {
+                    "name": "software_change_guarded_workflow",
+                    "applies_to": "bug fixes, code changes, refactors, and implementation tasks",
+                    "goal": "Complete the engineering task through inspection, minimal change, and verification evidence.",
+                    "memory_basis_ids": _fake_memory_ids(prompt),
+                    "strategy": [
+                        "Inspect the relevant repository context before editing.",
+                        "Make the smallest focused change that satisfies the task.",
+                        "Run the most relevant test, build, or lint command and report the result honestly.",
+                    ],
+                    "first_action": {"type": "inspect_repository", "questions": []},
+                    "avoid": ["Do not edit before inspecting relevant files.", "Do not claim completion without verification evidence."],
+                    "confidence": 0.84,
+                }
+            return {
+                "name": "memory_grounded_task_strategy",
+                "applies_to": "multi-step task requiring remembered preferences or project context",
+                "goal": "Use clean memory basis to choose a task-specific strategy before acting.",
+                "memory_basis_ids": _fake_memory_ids(prompt),
+                "strategy": ["Use only the supplied memory basis.", "Ask for clarification when required information is missing."],
+                "first_action": {"type": "proceed_or_clarify", "questions": []},
+                "avoid": ["Do not invent missing facts."],
+                "confidence": 0.74,
+            }
         if "consolidate memory cluster" in lowered:
             if "dynamic_cross_project" in lowered:
                 return {
@@ -185,3 +230,9 @@ def _safe_error(text: str) -> str:
     for line in str(redact_secrets(text)).splitlines()[:8]:
         redacted.append(line[:300])
     return "\n".join(redacted) or "model call failed"
+
+
+def _fake_memory_ids(prompt: str) -> list[str]:
+    import re
+
+    return list(dict.fromkeys(re.findall(r"mem_[a-zA-Z0-9]+", prompt)))[:8]

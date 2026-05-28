@@ -89,6 +89,32 @@ class RuntimeSkillTest(unittest.TestCase):
             finally:
                 service.close()
 
+    @patch("codex_memory.runtime_skill.RuntimeSkillSynthesizer._model_synthesize")
+    def test_runtime_skill_generation_uses_model_synthesizer(self, model_synthesize):
+        from codex_memory.runtime_skill import RuntimeSkill
+
+        model_synthesize.return_value = RuntimeSkill(
+            name="model_generated_logo_intake",
+            applies_to="logo design",
+            goal="clarify before design",
+            memory_basis_ids=[],
+            memory_basis_summary="No clean long-term memories matched this task.",
+            strategy=["Ask clarifying questions first.", "Offer directions after clarification."],
+            first_action={"type": "ask_clarifying_questions", "questions": ["品牌名称是什么？"]},
+            avoid=["Do not generate immediately."],
+            confidence=0.8,
+            intent="brand_logo_design",
+            domain="brand_design",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            try:
+                context = service.prompt_context("帮我画一个品牌 logo", cwd=tmp, session_id="s1")
+                self.assertIn("Runtime Skill: model_generated_logo_intake", context)
+                model_synthesize.assert_called_once()
+            finally:
+                service.close()
+
     def test_logo_request_generates_memory_grounded_intake_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = _service(tmp)
