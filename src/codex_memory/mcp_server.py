@@ -44,6 +44,34 @@ TOOLS = {
             "properties": {"status": {"type": "string"}, "limit": {"type": "integer", "default": 20}},
         },
     },
+    "codex_memory_runtime_status": {
+        "description": "Show observed workflow runtime status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cwd": {"type": "string"},
+                "session_id": {"type": "string"},
+                "turn_id": {"type": "string"},
+            },
+        },
+    },
+    "codex_memory_runtime_violations": {
+        "description": "List open observed workflow violations.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    },
+    "codex_memory_verification_recipes": {
+        "description": "List learned verification recipes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "default": 20}},
+        },
+    },
     "codex_memory_promote": {
         "description": "Promote a reviewed memory to active in the local Ledger.",
         "inputSchema": {
@@ -117,6 +145,16 @@ TOOLS = {
         "description": "Run heavier local Ledger diagnostics.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    "codex_memory_prune_runtime": {
+        "description": "Prune local runtime audit records, optionally including learned verification recipes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "older_than_days": {"type": "integer"},
+                "include_recipes": {"type": "boolean", "default": False},
+            },
+        },
+    },
 }
 
 MCP_TOOL_LEVELS = {
@@ -128,6 +166,7 @@ MCP_TOOL_LEVELS = {
     "codex_memory_delete": "admin",
     "codex_memory_reconcile": "admin",
     "codex_memory_consolidate": "admin",
+    "codex_memory_prune_runtime": "admin",
 }
 
 
@@ -149,6 +188,18 @@ def main() -> int:
             lambda service: service.ingest_event(_event_type(args.get("event_type", "manual")), {"text": _text(args["text"]), "source": "mcp"})
         ),
         "codex_memory_queue": lambda args: ledger.list_memories(_status_arg(args.get("status")), _limit(args.get("limit", 20))),
+        "codex_memory_runtime_status": lambda args: _with_service(
+            lambda service: service.runtime_status(
+                cwd=args.get("cwd"),
+                session_id=args.get("session_id"),
+                turn_id=args.get("turn_id"),
+            )
+        ),
+        "codex_memory_runtime_violations": lambda args: ledger.list_open_workflow_violations(
+            workflow_id=args.get("workflow_id"),
+            limit=_limit(args.get("limit", 20)),
+        ),
+        "codex_memory_verification_recipes": lambda args: _verification_recipes(ledger, _limit(args.get("limit", 20))),
         "codex_memory_promote": lambda args: _with_service(
             lambda service: service.promote_memory(_id_arg(args["memory_id"], "memory_id"), str(args.get("note", "")))
         ),
@@ -174,6 +225,12 @@ def main() -> int:
         ),
         "codex_memory_audit": lambda args: _audit(ledger),
         "codex_memory_diagnostics": lambda args: _diagnostics(config, ledger),
+        "codex_memory_prune_runtime": lambda args: _with_service(
+            lambda service: service.prune_runtime(
+                older_than_days=_optional_nonnegative_int(args.get("older_than_days"), "older_than_days"),
+                include_recipes=_bool_arg(args.get("include_recipes", False), "include_recipes"),
+            )
+        ),
     }
     try:
         for line in sys.stdin:
@@ -208,6 +265,16 @@ def _audit(ledger: Ledger) -> dict[str, Any]:
         "quarantine_sample": ledger.list_memories("quarantined", 10),
         "rejected_sample": ledger.list_memories("rejected", 10),
     }
+
+
+def _verification_recipes(ledger: Ledger, limit: int) -> list[dict[str, Any]]:
+    recipes = []
+    for record in ledger.list_cognitive_records(layer="skill", status="active", limit=max(limit, 100)):
+        if record.get("record_type") == "verification_recipe":
+            recipes.append(record)
+        if len(recipes) >= limit:
+            break
+    return recipes
 
 
 def _with_service(callback: Callable[[MemoryService], Any]) -> Any:
@@ -271,6 +338,17 @@ def _limit(value: Any, minimum: int = 1, maximum: int = 100) -> int:
     if limit < minimum or limit > maximum:
         raise ValueError(f"limit must be between {minimum} and {maximum}")
     return limit
+
+
+def _optional_nonnegative_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return parsed
 
 
 def _status_arg(value: Any) -> str | None:

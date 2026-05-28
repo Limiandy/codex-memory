@@ -1,6 +1,6 @@
 {
   "name": "codex-memory",
-  "version": "0.1.1",
+  "version": "0.2.0-alpha.1",
   "description": "Local Codex workflow guard and reviewed memory ledger.",
   "author": {
     "name": "Local developer"

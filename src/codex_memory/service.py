@@ -340,6 +340,9 @@ class MemoryService:
     def prune_events(self, older_than_days: int | None = None) -> dict[str, Any]:
         return self.ledger.prune_events(older_than_days=older_than_days)
 
+    def prune_runtime(self, older_than_days: int | None = None, include_recipes: bool = False) -> dict[str, Any]:
+        return self.ledger.prune_runtime_records(older_than_days=older_than_days, include_recipes=include_recipes)
+
     def cognitive_snapshot(self) -> dict[str, Any]:
         self.runtime.sync_all_active()
         return self.runtime.snapshot()

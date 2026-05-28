@@ -42,10 +42,52 @@ class HookTest(unittest.TestCase):
             self.assertIn("Codex Memory context:", context)
             self.assertIn("用户偏好默认使用中文回答", context)
 
+    def test_observed_runtime_hook_chain_records_violation_and_injects_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                **os.environ,
+                "PYTHONPATH": "src",
+                "CODEX_MEMORY_FAKE_MODEL": "1",
+                "CODEX_MEMORY_STATE_DIR": tmp,
+            }
+            base = {
+                "session_id": "runtime-session",
+                "turn_id": "runtime-turn",
+                "cwd": tmp,
+                "model": "gpt-5.5",
+            }
 
-def _run_hook(env, payload):
+            first = _run_hook(
+                env,
+                {
+                    **base,
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "修复这个 bug，并跑测试验证",
+                },
+                "user_message",
+            )
+            self.assertTrue(first["codexMemoryRuntime"]["started"])
+            _run_hook(env, {**base, "hook_event_name": "PostToolUse", "tool_name": "functions.exec_command", "cmd": "rg bug src"}, "after_tool_call")
+            _run_hook(env, {**base, "hook_event_name": "PostToolUse", "tool_name": "functions.apply_patch"}, "after_tool_call")
+            _run_hook(env, {**base, "hook_event_name": "Stop", "last_assistant_message": "已完成"}, "session_end")
+
+            followup = _run_hook(
+                env,
+                {
+                    **base,
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": "继续处理",
+                },
+                "user_message",
+            )
+            context = followup["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("Runtime control:", context)
+            self.assertIn("changed_without_verification", context)
+
+
+def _run_hook(env, payload, hook_name="user_message"):
     proc = subprocess.run(
-        [sys.executable, "-m", "codex_memory.hooks", "user_message"],
+        [sys.executable, "-m", "codex_memory.hooks", hook_name],
         cwd=".",
         env=env,
         input=json.dumps(payload, ensure_ascii=False),

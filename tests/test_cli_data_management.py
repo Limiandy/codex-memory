@@ -66,6 +66,17 @@ class CliDataManagementTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(prune.returncode, 0, prune.stderr)
+            prune_runtime = subprocess.run(
+                [sys.executable, "-m", "codex_memory.cli", "prune-runtime"],
+                cwd=".",
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            self.assertEqual(prune_runtime.returncode, 0, prune_runtime.stderr)
+            self.assertIn("pruned_runtime_records", json.loads(prune_runtime.stdout))
             wipe_without_confirm = subprocess.run(
                 [sys.executable, "-m", "codex_memory.cli", "wipe"],
                 cwd=".",

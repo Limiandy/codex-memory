@@ -1397,6 +1397,55 @@ class Ledger:
         self._commit()
         return {"pruned_events": count, "older_than_days": older_than_days}
 
+    def prune_runtime_records(self, older_than_days: int | None = None, include_recipes: bool = False) -> dict[str, Any]:
+        if older_than_days is not None and older_than_days < 0:
+            raise ValueError("older_than_days must be non-negative")
+        cutoff = None
+        if older_than_days is not None:
+            cutoff = (datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=older_than_days)).isoformat().replace("+00:00", "Z")
+        record_types = {"workflow_observation", "recipe_recommendation", "recipe_reuse"}
+        ids: list[str] = []
+        counts = {"workflow_observation": 0, "recipe_recommendation": 0, "recipe_reuse": 0, "resolved_workflow_violation": 0, "verification_recipe": 0}
+        rows = self.conn.execute(
+            """
+            SELECT id,layer,record_type,status,created_at,metadata_json
+            FROM cognitive_records
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+        for row in rows:
+            if cutoff and str(row["created_at"] or "") >= cutoff:
+                continue
+            record_type = str(row["record_type"] or "")
+            layer = str(row["layer"] or "")
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            should_delete = False
+            count_key = record_type
+            if layer == "audit" and record_type in record_types:
+                should_delete = True
+            elif layer == "audit" and record_type == "workflow_violation" and (row["status"] == "resolved" or metadata.get("resolved_at")):
+                should_delete = True
+                count_key = "resolved_workflow_violation"
+            elif include_recipes and layer == "skill" and record_type == "verification_recipe":
+                should_delete = True
+                count_key = "verification_recipe"
+            if should_delete:
+                ids.append(str(row["id"]))
+                counts[count_key] = counts.get(count_key, 0) + 1
+        with self.transaction():
+            for record_id in ids:
+                self.conn.execute("DELETE FROM cognitive_records WHERE id=?", (record_id,))
+                self.conn.execute("DELETE FROM cognitive_edges WHERE source_id=? OR target_id=?", (record_id, record_id))
+        return {
+            "pruned_runtime_records": len(ids),
+            "counts": counts,
+            "older_than_days": older_than_days,
+            "include_recipes": include_recipes,
+        }
+
     def set_status(self, memory_id: str, status: str, review: dict[str, Any] | None = None) -> None:
         if review is None:
             self.conn.execute("UPDATE memories SET status=?, updated_at=? WHERE id=?", (status, _now(), memory_id))

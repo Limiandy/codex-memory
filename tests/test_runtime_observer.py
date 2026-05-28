@@ -464,6 +464,30 @@ class RuntimeObserverTest(unittest.TestCase):
             finally:
                 service.close()
 
+    def test_prune_runtime_records_removes_audit_records_and_optionally_recipes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = _service(tmp)
+            try:
+                service.start_task_from_prompt({"prompt": "修复测试失败", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.exec_command", "cmd": "rg failing_test tests", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.apply_patch", "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_tool_use({"tool_name": "functions.exec_command", "cmd": "python3 -m unittest discover -s tests -v", "stdout": "OK", "exit_code": 0, "session_id": "s1", "turn_id": "t1", "cwd": tmp})
+                service.observe_stop({"session_id": "s1", "turn_id": "t1", "cwd": tmp, "last_assistant_message": "已完成，测试通过"})
+
+                self.assertTrue([item for item in service.ledger.list_cognitive_records(layer="audit", status="active", limit=50) if item.get("record_type") == "workflow_observation"])
+                self.assertTrue([item for item in service.ledger.list_cognitive_records(layer="skill", status="active", limit=50) if item.get("record_type") == "verification_recipe"])
+
+                pruned = service.prune_runtime()
+                self.assertGreater(pruned["counts"]["workflow_observation"], 0)
+                self.assertFalse([item for item in service.ledger.list_cognitive_records(layer="audit", status="active", limit=50) if item.get("record_type") == "workflow_observation"])
+                self.assertTrue([item for item in service.ledger.list_cognitive_records(layer="skill", status="active", limit=50) if item.get("record_type") == "verification_recipe"])
+
+                pruned_with_recipes = service.prune_runtime(include_recipes=True)
+                self.assertEqual(pruned_with_recipes["counts"]["verification_recipe"], 1)
+                self.assertFalse([item for item in service.ledger.list_cognitive_records(layer="skill", status="active", limit=50) if item.get("record_type") == "verification_recipe"])
+            finally:
+                service.close()
+
 
 if __name__ == "__main__":
     unittest.main()

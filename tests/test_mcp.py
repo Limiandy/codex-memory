@@ -36,6 +36,9 @@ class McpTest(unittest.TestCase):
                 names = {tool["name"] for tool in second["result"]["tools"]}
                 self.assertIn("codex_memory_search", names)
                 self.assertIn("codex_memory_diagnostics", names)
+                self.assertIn("codex_memory_runtime_status", names)
+                self.assertIn("codex_memory_runtime_violations", names)
+                self.assertIn("codex_memory_verification_recipes", names)
                 self.assertIn("codex_memory_promote", names)
                 self.assertIn("codex_memory_audit", names)
                 self.assertFalse(any("mempalace" in name for name in names))
@@ -85,6 +88,18 @@ class McpTest(unittest.TestCase):
                         "method": "tools/call",
                         "params": {"name": "codex_memory_queue", "arguments": {"limit": 5}},
                     },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_runtime_status", "arguments": {}},
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 5,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_verification_recipes", "arguments": {"limit": 5}},
+                    },
                 ]
                 for call in calls:
                     proc.stdin.write(json.dumps(call) + "\n")
@@ -92,10 +107,16 @@ class McpTest(unittest.TestCase):
                 json.loads(proc.stdout.readline())
                 status = json.loads(proc.stdout.readline())
                 queue = json.loads(proc.stdout.readline())
+                runtime_status = json.loads(proc.stdout.readline())
+                recipes = json.loads(proc.stdout.readline())
                 status_text = json.loads(status["result"]["content"][0]["text"])
                 queue_text = json.loads(queue["result"]["content"][0]["text"])
+                runtime_status_text = json.loads(runtime_status["result"]["content"][0]["text"])
+                recipes_text = json.loads(recipes["result"]["content"][0]["text"])
                 self.assertEqual(status_text["store"]["primary"], "ledger")
                 self.assertEqual(queue_text, [])
+                self.assertIn("active_workflow", runtime_status_text)
+                self.assertEqual(recipes_text, [])
                 self.assertTrue((Path(tmp) / "ledger.sqlite3").exists())
             finally:
                 for stream in (proc.stdin, proc.stdout, proc.stderr):
