@@ -40,6 +40,7 @@ class DoctorTest(unittest.TestCase):
             self.assertIn("checks", result)
             self.assertIn("summary", result)
             self.assertIn("sqlite_ledger", result["checks"])
+            self.assertIn("schema_migrations", result["checks"])
             self.assertIn("python_version", result["checks"])
             self.assertIn("sqlite_version", result["checks"])
             self.assertEqual(result["checks"]["sqlite_ledger"]["level"], "fatal")
@@ -49,6 +50,7 @@ class DoctorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_doctor(_config(tmp))
             self.assertTrue(result["checks"]["sqlite_ledger"]["ok"])
+            self.assertTrue(result["checks"]["schema_migrations"]["ok"])
             self.assertTrue(result["checks"]["mcp_server"]["ok"])
             self.assertEqual(result["checks"]["model_smoke"]["level"], "info")
 

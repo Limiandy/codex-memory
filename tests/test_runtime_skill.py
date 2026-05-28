@@ -445,6 +445,7 @@ class RuntimeSkillTest(unittest.TestCase):
                 metadata = seed["metadata_json"]
                 self.assertEqual(metadata["failure_count"], 3)
                 self.assertEqual(metadata["trust_state"], "suppressed")
+                self.assertEqual(seed["status"], "suppressed")
                 self.assertFalse(relevant_seed_skills(service.ledger, "帮我画一个品牌 logo"))
             finally:
                 service.close()
@@ -686,6 +687,39 @@ class RuntimeSkillTest(unittest.TestCase):
         self.assertEqual(classifier.classify("这个模板不适合").feedback_target, "seed_skill")
         self.assertEqual(classifier.classify("方向对，但问题太多").outcome, "mixed")
         self.assertFalse(classifier.classify("方向对，但问题太多").adjust_seed_skill_strength)
+
+    def test_feedback_classifier_uses_model_for_complex_feedback(self):
+        from codex_memory.feedback_classifier import RuntimeSkillFeedbackClassifier
+
+        class FeedbackModel:
+            def __init__(self):
+                self.calls = []
+
+            def complete_json(self, prompt, schema, timeout_seconds=None):
+                self.calls.append(timeout_seconds)
+                return {
+                    "outcome": "positive",
+                    "feedback_target": "skill_strategy",
+                    "confidence": 0.9,
+                    "reason": "strategy was explicitly praised",
+                }
+
+        model = FeedbackModel()
+        decision = RuntimeSkillFeedbackClassifier(model).classify("方向对，但问题太多")
+        self.assertEqual(model.calls, [12])
+        self.assertEqual(decision.feedback_target, "skill_strategy")
+        self.assertTrue(decision.adjust_seed_skill_strength)
+
+    def test_feedback_classifier_can_disable_model(self):
+        from codex_memory.feedback_classifier import RuntimeSkillFeedbackClassifier
+
+        class FeedbackModel:
+            def complete_json(self, prompt, schema, timeout_seconds=None):
+                raise AssertionError("model should not be called")
+
+        decision = RuntimeSkillFeedbackClassifier(FeedbackModel(), enable_model=False).classify("方向对，但问题太多")
+        self.assertEqual(decision.outcome, "mixed")
+        self.assertFalse(decision.adjust_seed_skill_strength)
 
     def test_priority_runtime_skill_templates_trigger_with_fallback(self):
         from codex_memory.runtime_skill import RuntimeSkillSynthesizer

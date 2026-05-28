@@ -159,11 +159,11 @@ Seed skills can be imported to provide a cold-start skill basis before the local
 
 By default this imports agent skill markdown from [`msitarzewski/agency-agents`](https://github.com/msitarzewski/agency-agents) on demand and records each entry as a local `seed_skill` cognitive record with source path, commit, content hash, trust level, feedback counters, and MIT license metadata. The source content is not vendored into this repository. Use `--source /path/to/agency-agents` for an already cloned checkout, `--category design` to import one category, and `--limit N` for a smaller trial import.
 
-Seed skills are a bootstrap layer, not a replacement for personal memory. Runtime Skill generation can use them when long-term memories are still empty; as reviewed memories, successful workflows, and user feedback accumulate, user-specific memories and durable skills should become the stronger basis. Seed skills stay active for cold start but carry `trust_level`, `trust_state`, source hash, license metadata, and feedback counters; repeated failures, `seed-skills disable`, or `seed-skills suppress` remove them from future Runtime Skill basis retrieval.
+Seed skills are a bootstrap layer, not a replacement for personal memory. Runtime Skill generation can use them when long-term memories are still empty; as reviewed memories, successful workflows, and user feedback accumulate, user-specific memories and durable skills should become the stronger basis. Seed skills stay active for cold start but carry `trust_level`, `trust_state`, source hash, license metadata, and feedback counters; repeated failures, `seed-skills disable`, or `seed-skills suppress` remove them from future Runtime Skill basis retrieval. Disabled and suppressed seed skills also update their record status, so `status` and `trust_state` do not disagree.
 
 Runtime Skill injections are recorded as local runtime records with the generated skill JSON, memory basis ids, durable skill ids, seed skill ids, session/turn metadata, and a redacted prompt preview. Feedback is associated with the same turn when available, or with the latest same-session injection within a short recent window. Successful workflows can synthesize `dynamic_skill` candidates, but those candidates are not recommended until they are promoted to active.
 
-Runtime Skill injection and feedback records are stored as local `runtime_skill` cognitive records. Older alpha Ledgers may still contain legacy audit-layer Runtime Skill records; the runtime keeps reading and pruning both shapes.
+Runtime Skill injection and feedback records are stored as local `runtime_skill` cognitive records. Older alpha Ledgers may still contain legacy audit-layer Runtime Skill records; the Ledger runs an idempotent `runtime_skill_governance_shape` migration to normalize those records, add shape metadata, and reconcile seed skill status/trust state. `doctor` reports the migration state.
 
 Dynamic skill governance:
 
@@ -185,6 +185,8 @@ Runtime and seed skill governance:
 ./scripts/codex-memory seed-skills restore <seed_skill_id>
 ./scripts/codex-memory seed-skills stats
 ```
+
+Runtime Skill feedback attribution is rule-first. Ambiguous or multi-target feedback can use a short model check; set `CODEX_MEMORY_FEEDBACK_MODEL=0` to keep attribution purely deterministic. `runtime-benchmark` reads the maintained benchmark fixture by default and supports `--synthetic` for the generated regression set.
 
 ## Uninstall
 

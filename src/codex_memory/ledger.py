@@ -28,6 +28,9 @@ _WIPE_TABLES = (
     "memories",
 )
 
+RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION = 2
+RUNTIME_SKILL_GOVERNANCE_MIGRATION_NAME = "runtime_skill_governance_shape"
+
 
 class Ledger:
     def __init__(self, path: Path):
@@ -209,6 +212,7 @@ class Ledger:
         self._ensure_recall_event_columns()
         self._ensure_cognitive_record_columns()
         self._ensure_indexes()
+        self.run_runtime_skill_governance_migration()
         self._commit()
 
     @contextmanager
@@ -235,6 +239,86 @@ class Ledger:
             "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
             (1, "baseline_ledger_cognitive_runtime", _now()),
         )
+
+    def run_runtime_skill_governance_migration(self) -> dict[str, Any]:
+        counts = {
+            "legacy_runtime_skill_records": 0,
+            "runtime_skill_shape_updates": 0,
+            "seed_status_normalized": 0,
+        }
+        rows = self.conn.execute(
+            """
+            SELECT id,layer,record_type,status,metadata_json
+            FROM cognitive_records
+            WHERE (layer='audit' AND record_type IN ('runtime_skill_injection','runtime_skill_feedback'))
+               OR (layer='runtime_skill' AND record_type IN ('injection','feedback'))
+               OR (layer='skill' AND record_type='seed_skill')
+            """
+        ).fetchall()
+        with self.transaction():
+            for row in rows:
+                record_id = str(row["id"])
+                layer = str(row["layer"] or "")
+                record_type = str(row["record_type"] or "")
+                status = str(row["status"] or "")
+                metadata = _json_obj(row["metadata_json"])
+                if layer == "audit" and record_type in {"runtime_skill_injection", "runtime_skill_feedback"}:
+                    new_type = "injection" if record_type == "runtime_skill_injection" else "feedback"
+                    metadata.setdefault("shape_version", 2)
+                    self.conn.execute(
+                        "UPDATE cognitive_records SET layer='runtime_skill', record_type=?, metadata_json=?, updated_at=? WHERE id=?",
+                        (new_type, json.dumps(metadata, ensure_ascii=False), _now(), record_id),
+                    )
+                    counts["legacy_runtime_skill_records"] += 1
+                    continue
+                if layer == "runtime_skill" and record_type in {"injection", "feedback"} and metadata.get("shape_version") != 2:
+                    metadata["shape_version"] = 2
+                    self.conn.execute(
+                        "UPDATE cognitive_records SET metadata_json=?, updated_at=? WHERE id=?",
+                        (json.dumps(metadata, ensure_ascii=False), _now(), record_id),
+                    )
+                    counts["runtime_skill_shape_updates"] += 1
+                    continue
+                if layer == "skill" and record_type == "seed_skill":
+                    normalized_status, normalized_metadata = _normalized_seed_skill_state(status, metadata)
+                    if normalized_status != status or normalized_metadata != metadata:
+                        self.conn.execute(
+                            "UPDATE cognitive_records SET status=?, metadata_json=?, updated_at=? WHERE id=?",
+                            (normalized_status, json.dumps(normalized_metadata, ensure_ascii=False), _now(), record_id),
+                        )
+                        counts["seed_status_normalized"] += 1
+            self.conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+                (RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION, RUNTIME_SKILL_GOVERNANCE_MIGRATION_NAME, _now()),
+            )
+        return {"version": RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION, "name": RUNTIME_SKILL_GOVERNANCE_MIGRATION_NAME, "counts": counts}
+
+    def runtime_skill_governance_migration_status(self) -> dict[str, Any]:
+        migration = self.conn.execute(
+            "SELECT version,name,applied_at FROM schema_migrations WHERE version=?",
+            (RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION,),
+        ).fetchone()
+        legacy_count = self.conn.execute(
+            "SELECT COUNT(*) FROM cognitive_records WHERE layer='audit' AND record_type IN ('runtime_skill_injection','runtime_skill_feedback')"
+        ).fetchone()[0]
+        conflict_count = 0
+        rows = self.conn.execute(
+            "SELECT status,metadata_json FROM cognitive_records WHERE layer='skill' AND record_type='seed_skill'"
+        ).fetchall()
+        for row in rows:
+            status = str(row["status"] or "")
+            trust_state = str(_json_obj(row["metadata_json"]).get("trust_state") or "")
+            if (status == "active" and trust_state in {"suppressed", "disabled"}) or (status == "suppressed" and trust_state != "suppressed") or (status == "deprecated" and trust_state not in {"disabled", "deprecated"}):
+                conflict_count += 1
+        return {
+            "version": RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION,
+            "name": RUNTIME_SKILL_GOVERNANCE_MIGRATION_NAME,
+            "applied": migration is not None,
+            "applied_at": migration["applied_at"] if migration else None,
+            "legacy_runtime_skill_records": int(legacy_count),
+            "seed_status_trust_conflicts": conflict_count,
+            "ok": migration is not None and int(legacy_count) == 0 and conflict_count == 0,
+        }
 
     def _ensure_memory_columns(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
@@ -675,6 +759,7 @@ class Ledger:
                 "turn_id": turn_id,
                 "cwd": cwd,
                 "project_key": project_key,
+                "shape_version": 2,
             },
             source_kind="runtime_skill_injection",
         )
@@ -756,6 +841,7 @@ class Ledger:
                 "evidence": evidence,
                 "seed_skill_ids": metadata.get("seed_skill_ids") or [],
                 "durable_skill_ids": metadata.get("durable_skill_ids") or [],
+                "shape_version": 2,
             },
             source_kind="runtime_skill_feedback",
         )
@@ -782,8 +868,12 @@ class Ledger:
         metadata["last_feedback_at"] = _now()
         if metadata["failure_count"] >= 3 and metadata["failure_count"] > metadata["success_count"]:
             metadata["trust_state"] = "suppressed"
+            self.set_cognitive_record_status(seed_id, "suppressed", metadata)
+            return
         elif metadata.get("trust_state") == "suppressed" and metadata["success_count"] >= metadata["failure_count"]:
             metadata["trust_state"] = "trusted" if metadata.get("source_verified") else "unverified"
+            self.set_cognitive_record_status(seed_id, "active", metadata)
+            return
         self.adjust_cognitive_record_strength(seed_id, 0.05 if success else -0.1, metadata)
 
     def _record_durable_skill_feedback(self, skill_id: str, success: bool) -> None:
@@ -1843,6 +1933,37 @@ def _runtime_skill_feedback_target(outcome: str, evidence: dict[str, Any]) -> st
     if source == "workflow_stop":
         return "workflow_execution"
     return "unknown"
+
+
+def _json_obj(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalized_seed_skill_state(status: str, metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    normalized = dict(metadata)
+    trust_state = str(normalized.get("trust_state") or "").strip()
+    if not trust_state:
+        trust_state = "trusted" if normalized.get("source_verified") else "unverified"
+        normalized["trust_state"] = trust_state
+    if trust_state == "disabled":
+        return "deprecated", normalized
+    if trust_state == "suppressed":
+        return "suppressed", normalized
+    if status == "deprecated":
+        normalized["trust_state"] = "disabled"
+        return "deprecated", normalized
+    if status == "suppressed":
+        normalized["trust_state"] = "suppressed"
+        return "suppressed", normalized
+    if trust_state in {"trusted", "unverified"} and status != "active":
+        return "active", normalized
+    return status or "active", normalized
 
 
 def _days_from_now(days: int | None) -> str | None:

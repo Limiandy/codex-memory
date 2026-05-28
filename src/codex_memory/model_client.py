@@ -209,6 +209,18 @@ class CodexMiniClient:
                 "avoid": ["Do not invent missing facts."],
                 "confidence": 0.74,
             }
+        if "classify runtime skill feedback" in lowered:
+            if "模板" in lowered or "seed" in lowered:
+                return {"outcome": "negative", "feedback_target": "seed_skill", "confidence": 0.82, "reason": "fake seed feedback"}
+            if "长期技能" in lowered or "durable" in lowered:
+                return {"outcome": "negative", "feedback_target": "durable_skill", "confidence": 0.82, "reason": "fake durable feedback"}
+            if "方向对" in lowered and "问题太多" in lowered:
+                return {"outcome": "mixed", "feedback_target": "skill_strategy", "confidence": 0.76, "reason": "fake mixed strategy and first action feedback"}
+            if "提问" in lowered or "问题" in lowered:
+                return {"outcome": "positive", "feedback_target": "first_action", "confidence": 0.84, "reason": "fake first action feedback"}
+            if "方向" in lowered or "策略" in lowered:
+                return {"outcome": "positive", "feedback_target": "skill_strategy", "confidence": 0.84, "reason": "fake strategy feedback"}
+            return {"outcome": "positive", "feedback_target": "final_result", "confidence": 0.8, "reason": "fake final result feedback"}
         if "consolidate memory cluster" in lowered:
             if "dynamic_cross_project" in lowered:
                 return {

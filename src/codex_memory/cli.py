@@ -49,7 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status")
-    sub.add_parser("runtime-benchmark")
+    runtime_benchmark = sub.add_parser("runtime-benchmark")
+    runtime_benchmark.add_argument("--fixture", default=None)
+    runtime_benchmark.add_argument("--synthetic", action="store_true")
     runtime_status = sub.add_parser("runtime-status")
     runtime_status.add_argument("--cwd", default=None)
     runtime_status.add_argument("--session-id", default=None)
@@ -219,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "status":
             return _print(service.status())
         if args.cmd == "runtime-benchmark":
-            return _print(run_runtime_skill_benchmark())
+            return _print(run_runtime_skill_benchmark(fixture_path=args.fixture, synthetic=args.synthetic))
         if args.cmd == "runtime-status":
             status = service.runtime_status(cwd=args.cwd, session_id=args.session_id, turn_id=args.turn_id)
             if args.pretty:

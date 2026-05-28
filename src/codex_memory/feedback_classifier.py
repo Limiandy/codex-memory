@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
+
+from .model_client import ModelError
+
+
+FEEDBACK_MODEL_TIMEOUT_SECONDS = 12
 
 
 @dataclass(frozen=True)
@@ -23,6 +29,10 @@ class RuntimeSkillFeedbackDecision:
 
 
 class RuntimeSkillFeedbackClassifier:
+    def __init__(self, model: Any | None = None, enable_model: bool = True):
+        self.model = model
+        self.enable_model = enable_model
+
     def classify(self, feedback_text: str) -> RuntimeSkillFeedbackDecision | None:
         text = " ".join(str(feedback_text or "").strip().lower().split())
         if not text:
@@ -30,7 +40,7 @@ class RuntimeSkillFeedbackClassifier:
         positive = _has_positive(text)
         negative = _has_any(text, _NEGATIVE)
         if not positive and not negative:
-            return None
+            return self._model_classify(text, None) if self._should_call_model(text, None) else None
         outcome = "mixed" if positive and negative else "positive" if positive else "negative"
         target = _target(text)
         dimensions = _dimensions(outcome, target)
@@ -45,7 +55,7 @@ class RuntimeSkillFeedbackClassifier:
         if outcome == "mixed":
             adjust_seed = False
             adjust_durable = False
-        return RuntimeSkillFeedbackDecision(
+        decision = RuntimeSkillFeedbackDecision(
             outcome=outcome,
             feedback_target=target,
             dimensions=dimensions,
@@ -53,6 +63,42 @@ class RuntimeSkillFeedbackClassifier:
             adjust_durable_skill_strength=adjust_durable,
             reason=f"rule_target:{target}",
         )
+        if self._should_call_model(text, decision):
+            return self._model_classify(text, decision) or decision
+        return decision
+
+    def _should_call_model(self, text: str, decision: RuntimeSkillFeedbackDecision | None) -> bool:
+        if self.model is None or not self.enable_model:
+            return False
+        if decision and decision.outcome == "mixed":
+            return True
+        return _target_signal_count(text) > 1
+
+    def _model_classify(self, text: str, fallback: RuntimeSkillFeedbackDecision | None) -> RuntimeSkillFeedbackDecision | None:
+        prompt = (
+            "Classify Runtime Skill feedback. Return JSON only. "
+            "Do not change durable or seed strength for generic final-result praise. "
+            "Use mixed when the user praises one aspect and criticizes another.\n\n"
+            f"Feedback:\n{text[:1200]}"
+        )
+        schema = {
+            "outcome": "positive|negative|mixed|unknown",
+            "feedback_target": "first_action|skill_strategy|memory_basis|seed_skill|durable_skill|final_result|execution",
+            "confidence": 0.0,
+            "reason": "short reason",
+        }
+        try:
+            result = self.model.complete_json(prompt, schema, timeout_seconds=FEEDBACK_MODEL_TIMEOUT_SECONDS)
+        except TypeError:
+            try:
+                result = self.model.complete_json(prompt, schema)
+            except (ModelError, ValueError, TypeError):
+                return fallback
+        except (ModelError, ValueError, TypeError):
+            return fallback
+        if not isinstance(result, dict):
+            return fallback
+        return _decision_from_model(result, fallback)
 
 
 def _target(text: str) -> str:
@@ -69,6 +115,51 @@ def _target(text: str) -> str:
     if _has_any(text, ("执行", "验证", "测试", "verification", "test")):
         return "execution"
     return "final_result"
+
+
+def _target_signal_count(text: str) -> int:
+    targets = set()
+    for target, signals in (
+        ("seed_skill", ("模板", "agent", "seed", "种子")),
+        ("durable_skill", ("durable", "dynamic", "长期技能", "持久技能")),
+        ("memory_basis", ("偏好", "记忆", "memory", "不是我的偏好")),
+        ("first_action", ("提问", "问题", "question", "clarify", "澄清")),
+        ("skill_strategy", ("方向", "策略", "方法", "流程", "workflow", "strategy")),
+        ("execution", ("执行", "验证", "测试", "verification", "test")),
+    ):
+        if _has_any(text, signals):
+            targets.add(target)
+    return len(targets)
+
+
+def _decision_from_model(result: dict[str, Any], fallback: RuntimeSkillFeedbackDecision | None) -> RuntimeSkillFeedbackDecision | None:
+    outcome = str(result.get("outcome") or "").strip().lower()
+    target = str(result.get("feedback_target") or "").strip().lower()
+    if outcome not in {"positive", "negative", "mixed", "unknown"}:
+        return fallback
+    if target not in {"first_action", "skill_strategy", "memory_basis", "seed_skill", "durable_skill", "final_result", "execution"}:
+        return fallback
+    try:
+        confidence = float(result.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if outcome == "mixed" or confidence < 0.72:
+        adjust_seed = False
+        adjust_durable = False
+    else:
+        adjust_seed = target in {"seed_skill", "skill_strategy", "first_action"}
+        adjust_durable = target in {"durable_skill", "skill_strategy", "first_action", "execution"}
+    if target in {"memory_basis", "final_result"}:
+        adjust_seed = False
+        adjust_durable = False
+    return RuntimeSkillFeedbackDecision(
+        outcome=outcome,
+        feedback_target=target,
+        dimensions=_dimensions(outcome, target),
+        adjust_seed_skill_strength=adjust_seed,
+        adjust_durable_skill_strength=adjust_durable,
+        reason=f"model_target:{target}:{str(result.get('reason') or '')[:120]}",
+    )
 
 
 def _dimensions(outcome: str, target: str) -> dict[str, str]:

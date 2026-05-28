@@ -1,0 +1,22 @@
+{"kind":"task","category":"direct_answer","prompt":"现在天气怎么样？","skill_needed":false}
+{"kind":"task","category":"direct_answer","prompt":"把 hello 翻译成中文","skill_needed":false}
+{"kind":"task","category":"direct_answer","prompt":"UTC+8 现在几点？","skill_needed":false}
+{"kind":"task","category":"direct_answer","prompt":"解释一下 API 这个词","skill_needed":false}
+{"kind":"task","category":"creative_design","prompt":"帮我设计一个品牌 logo 方向","skill_needed":true}
+{"kind":"task","category":"creative_design","prompt":"帮我做一套视觉识别方案","skill_needed":true}
+{"kind":"task","category":"creative_design","prompt":"给我的品牌设计一个极简标志","skill_needed":true}
+{"kind":"task","category":"planning_business","prompt":"帮我制定一个产品营销策略","skill_needed":true}
+{"kind":"task","category":"planning_business","prompt":"帮我写一份融资 pitch 的结构","skill_needed":true}
+{"kind":"task","category":"planning_business","prompt":"帮我做商业计划梳理","skill_needed":true}
+{"kind":"task","category":"engineering","prompt":"帮我修复这个 bug 并运行测试","skill_needed":true}
+{"kind":"task","category":"engineering","prompt":"帮我做代码审查并指出风险","skill_needed":true}
+{"kind":"task","category":"engineering","prompt":"帮我设计这个模块的架构方案","skill_needed":true}
+{"kind":"task","category":"ambiguous","prompt":"测试","skill_needed":false}
+{"kind":"task","category":"ambiguous","prompt":"fix","skill_needed":false}
+{"kind":"task","category":"ambiguous","prompt":"代码","skill_needed":false}
+{"kind":"feedback","category":"feedback","prompt":"很好","target":"final_result"}
+{"kind":"feedback","category":"feedback","prompt":"这个方向很好","target":"skill_strategy"}
+{"kind":"feedback","category":"feedback","prompt":"这个提问方式很好","target":"first_action"}
+{"kind":"feedback","category":"feedback","prompt":"不是我的偏好","target":"memory_basis"}
+{"kind":"feedback","category":"feedback","prompt":"这个模板不适合","target":"seed_skill"}
+{"kind":"feedback","category":"feedback","prompt":"这个长期技能不适合","target":"durable_skill"}

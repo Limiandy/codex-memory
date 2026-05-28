@@ -114,7 +114,12 @@ def relevant_seed_skills(ledger: Any, prompt: str, limit: int = 4) -> list[dict[
 
 
 def is_seed_skill_eligible(record: dict[str, Any]) -> bool:
-    if record.get("status") != "active" or record.get("record_type") != "seed_skill":
+    if record.get("record_type") != "seed_skill":
+        return False
+    status = str(record.get("status") or "")
+    if status in {"suppressed", "deprecated", "deleted", "rejected"}:
+        return False
+    if status != "active":
         return False
     metadata = record.get("metadata_json") or {}
     if metadata.get("trust_level") != "external_seed":

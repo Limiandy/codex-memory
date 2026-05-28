@@ -225,7 +225,9 @@ class CliDataManagementTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(disable.returncode, 0, disable.stderr)
-            self.assertEqual(json.loads(disable.stdout)["metadata_json"]["trust_state"], "disabled")
+            disabled_payload = json.loads(disable.stdout)
+            self.assertEqual(disabled_payload["metadata_json"]["trust_state"], "disabled")
+            self.assertEqual(disabled_payload["status"], "deprecated")
 
             restore = subprocess.run(
                 [sys.executable, "-m", "codex_memory.cli", "seed-skills", "restore", seed_id],
@@ -237,7 +239,9 @@ class CliDataManagementTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(restore.returncode, 0, restore.stderr)
-            self.assertEqual(json.loads(restore.stdout)["metadata_json"]["trust_state"], "unverified")
+            restored_payload = json.loads(restore.stdout)
+            self.assertEqual(restored_payload["metadata_json"]["trust_state"], "unverified")
+            self.assertEqual(restored_payload["status"], "active")
 
             context = subprocess.run(
                 [sys.executable, "-m", "codex_memory.cli", "search", "帮我画一个品牌 logo"],
@@ -260,7 +264,21 @@ class CliDataManagementTest(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(benchmark.returncode, 0, benchmark.stderr)
-            self.assertIn("skill_trigger_recall", json.loads(benchmark.stdout))
+            benchmark_payload = json.loads(benchmark.stdout)
+            self.assertIn("skill_trigger_recall", benchmark_payload)
+            self.assertNotEqual(benchmark_payload["source"], "synthetic")
+
+            synthetic = subprocess.run(
+                [sys.executable, "-m", "codex_memory.cli", "runtime-benchmark", "--synthetic"],
+                cwd=".",
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            self.assertEqual(synthetic.returncode, 0, synthetic.stderr)
+            self.assertEqual(json.loads(synthetic.stdout)["source"], "synthetic")
 
 
 if __name__ == "__main__":

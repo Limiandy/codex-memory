@@ -394,7 +394,7 @@ class MemoryService:
         session_id: str | None = None,
         turn_id: str | None = None,
     ) -> dict[str, Any] | None:
-        decision = RuntimeSkillFeedbackClassifier().classify(prompt)
+        decision = RuntimeSkillFeedbackClassifier(self.model, enable_model=self.config.enable_feedback_model).classify(prompt)
         if not decision:
             return None
         injection = self.ledger.latest_runtime_skill_injection(session_id=session_id, turn_id=turn_id, max_age_minutes=30)
@@ -519,18 +519,28 @@ class MemoryService:
         if not record:
             return None
         patch = {"trust_state": trust_state, "last_status_change_at": _utc_now()}
+        status = "active"
         if trust_state == "disabled":
             patch["disabled_at"] = _utc_now()
-        return self.ledger.patch_cognitive_record_metadata(skill_id, patch)
+            status = "deprecated"
+        elif trust_state == "suppressed":
+            patch["suppressed_at"] = _utc_now()
+            status = "suppressed"
+        elif trust_state not in {"trusted", "unverified"}:
+            status = str(record.get("status") or "active")
+        return self.ledger.set_cognitive_record_status(skill_id, status, patch)
 
     def seed_skill_stats(self) -> dict[str, Any]:
         skills = self.list_seed_skills(limit=1000)
         counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
         for skill in skills:
             metadata = skill.get("metadata_json") or {}
             state = str(metadata.get("trust_state") or "unknown")
             counts[state] = counts.get(state, 0) + 1
-        return {"count": len(skills), "by_trust_state": counts, "skills": skills[:20]}
+            status = str(skill.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return {"count": len(skills), "by_status": status_counts, "by_trust_state": counts, "skills": skills[:20]}
 
     def list_dynamic_skills(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return DurableSkillManager(self.ledger).list(status=status, limit=limit)

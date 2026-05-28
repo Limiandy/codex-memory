@@ -39,6 +39,49 @@ class LedgerTransactionTest(unittest.TestCase):
                 row = ledger.conn.execute("SELECT version,name FROM schema_migrations WHERE version=1").fetchone()
                 self.assertIsNotNone(row)
                 self.assertEqual(row["name"], "baseline_ledger_cognitive_runtime")
+                governance = ledger.conn.execute("SELECT version,name FROM schema_migrations WHERE version=2").fetchone()
+                self.assertIsNotNone(governance)
+                self.assertEqual(governance["name"], "runtime_skill_governance_shape")
+            finally:
+                ledger.close()
+
+    def test_runtime_skill_governance_migration_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(Path(tmp) / "ledger.sqlite3")
+            try:
+                legacy = ledger.record_cognitive_record(
+                    "audit",
+                    "runtime_skill_injection",
+                    None,
+                    "legacy",
+                    "active",
+                    "session",
+                    metadata={"seed_skill_ids": [], "turn_id": "t1"},
+                    source_kind="runtime_skill_injection",
+                )
+                seed = ledger.record_cognitive_record(
+                    "skill",
+                    "seed_skill",
+                    "agency-agents:design/example.md",
+                    "seed",
+                    "active",
+                    "global",
+                    metadata={"trust_level": "external_seed", "trust_state": "suppressed"},
+                )
+
+                first = ledger.run_runtime_skill_governance_migration()
+                second = ledger.run_runtime_skill_governance_migration()
+
+                migrated = ledger.get_cognitive_record(str(legacy["id"]))
+                self.assertEqual(migrated["layer"], "runtime_skill")
+                self.assertEqual(migrated["record_type"], "injection")
+                self.assertEqual(migrated["metadata_json"]["shape_version"], 2)
+                normalized = ledger.get_cognitive_record(str(seed["id"]))
+                self.assertEqual(normalized["status"], "suppressed")
+                self.assertEqual(normalized["metadata_json"]["trust_state"], "suppressed")
+                self.assertEqual(first["counts"]["legacy_runtime_skill_records"], 1)
+                self.assertEqual(second["counts"]["legacy_runtime_skill_records"], 0)
+                self.assertTrue(ledger.runtime_skill_governance_migration_status()["ok"])
             finally:
                 ledger.close()
 

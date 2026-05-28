@@ -17,7 +17,7 @@ MEMORY_TYPES = {
 SCOPES = {"global", "project", "session"}
 TTLS = {"short", "session", "long"}
 ACTIONS = {"store", "update", "merge", "skip", "forget"}
-STATUSES = {"candidate", "active", "quarantined", "rejected", "superseded", "deleted"}
+STATUSES = {"candidate", "active", "quarantined", "rejected", "superseded", "deprecated", "suppressed", "deleted"}
 
 
 @dataclass

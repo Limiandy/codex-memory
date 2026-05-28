@@ -25,6 +25,7 @@ def run_doctor(config: Config, model_check: bool = False, privacy: bool = False)
         "sqlite_version": _check_sqlite_version(),
         "state_dir": _check_state_dir(config),
         "sqlite_ledger": _check_sqlite_ledger(config),
+        "schema_migrations": _check_schema_migrations(config),
         "codex_cli": _check_codex_cli(),
         "installed_plugin": _check_installed_plugin(),
         "raw_event_storage": _check_raw_event_storage(config),
@@ -92,6 +93,24 @@ def _check_sqlite_ledger(config: Config) -> dict[str, Any]:
         return _result("fatal", True, path=str(config.ledger_path), stats=stats)
     except Exception as exc:
         return _result("fatal", False, path=str(config.ledger_path), error=str(exc), fix_hint="Check SQLite file permissions or move CODEX_MEMORY_STATE_DIR to a writable path.")
+
+
+def _check_schema_migrations(config: Config) -> dict[str, Any]:
+    try:
+        ledger = Ledger(config.ledger_path)
+        try:
+            status = ledger.runtime_skill_governance_migration_status()
+        finally:
+            ledger.close()
+        ok = bool(status.pop("ok", False))
+        return _result(
+            "warn",
+            ok,
+            **status,
+            fix_hint="Open the Ledger with the current codex-memory version or rerun doctor to apply idempotent runtime skill governance migrations.",
+        )
+    except Exception as exc:
+        return _result("warn", False, error=str(exc), fix_hint="Check Ledger permissions and schema_migrations integrity.")
 
 
 def _check_codex_cli() -> dict[str, Any]:
