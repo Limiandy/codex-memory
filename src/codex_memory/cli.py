@@ -136,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
     dynamic_skills.add_argument("--reason", default="")
     dynamic_skills.add_argument("--limit", type=int, default=50)
 
+    traces = sub.add_parser("traces")
+    traces.add_argument("trace_cmd", choices=["list", "show", "events", "summary", "audit", "export", "prune"])
+    traces.add_argument("trace_id", nargs="?")
+    traces.add_argument("--session-id", default=None)
+    traces.add_argument("--turn-id", default=None)
+    traces.add_argument("--limit", type=int, default=50)
+    traces.add_argument("--older-than-days", type=int, default=None)
+
     sub.add_parser("expire")
     sub.add_parser("reconcile")
     sub.add_parser("audit")
@@ -304,6 +312,21 @@ def main(argv: list[str] | None = None) -> int:
                 return _print(_require_result(service.suppress_dynamic_skill(args.dynamic_id or "", reason=args.reason), "dynamic_skill_not_found"))
             if args.dynamic_cmd == "stats":
                 return _print(service.dynamic_skill_stats())
+        if args.cmd == "traces":
+            if args.trace_cmd == "list":
+                return _print(service.list_traces(session_id=args.session_id, turn_id=args.turn_id, limit=args.limit))
+            if args.trace_cmd == "show":
+                return _print(_require_result(service.get_trace(args.trace_id or ""), "trace_not_found"))
+            if args.trace_cmd == "events":
+                return _print(service.trace_events(args.trace_id or "", limit=args.limit))
+            if args.trace_cmd == "summary":
+                return _print(_require_result(service.trace_summary(args.trace_id or ""), "trace_not_found"))
+            if args.trace_cmd == "audit":
+                return _print(service.trace_audit())
+            if args.trace_cmd == "export":
+                return _print(_require_result(service.export_trace(args.trace_id or ""), "trace_not_found"))
+            if args.trace_cmd == "prune":
+                return _print(service.prune_traces(older_than_days=args.older_than_days))
         if args.cmd == "expire":
             return _print(service.expire_due_memories())
         if args.cmd == "reconcile":

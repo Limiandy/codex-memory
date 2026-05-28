@@ -193,6 +193,26 @@ TOOLS = {
         "description": "Summarize durable dynamic skill reuse, feedback, and review state.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    "codex_memory_traces": {
+        "description": "List Runtime Trace flow monitor records.",
+        "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string"}, "turn_id": {"type": "string"}, "limit": {"type": "integer", "default": 20}}},
+    },
+    "codex_memory_trace_show": {
+        "description": "Show a Runtime Trace with spans, links, and summary.",
+        "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string"}}, "required": ["trace_id"]},
+    },
+    "codex_memory_trace_events": {
+        "description": "List ordered Runtime Trace events.",
+        "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string"}, "limit": {"type": "integer", "default": 100}}, "required": ["trace_id"]},
+    },
+    "codex_memory_trace_summary": {
+        "description": "Summarize a Runtime Trace lifecycle.",
+        "inputSchema": {"type": "object", "properties": {"trace_id": {"type": "string"}}, "required": ["trace_id"]},
+    },
+    "codex_memory_trace_audit": {
+        "description": "Audit Runtime Trace health and incomplete flows.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     "codex_memory_promote_dynamic_skill": {
         "description": "Promote a dynamic skill candidate to active durable skill.",
         "inputSchema": {"type": "object", "properties": {"skill_id": {"type": "string"}, "note": {"type": "string", "default": ""}}, "required": ["skill_id"]},
@@ -295,6 +315,11 @@ def main() -> int:
         "codex_memory_seed_skill_stats": lambda args: _with_service(lambda service: service.seed_skill_stats()),
         "codex_memory_dynamic_skills": lambda args: _with_service(lambda service: service.list_dynamic_skills(status=args.get("status"), limit=_limit(args.get("limit", 20)))),
         "codex_memory_dynamic_skill_stats": lambda args: _with_service(lambda service: service.dynamic_skill_stats()),
+        "codex_memory_traces": lambda args: _with_service(lambda service: service.list_traces(session_id=args.get("session_id"), turn_id=args.get("turn_id"), limit=_limit(args.get("limit", 20)))),
+        "codex_memory_trace_show": lambda args: _with_service(lambda service: service.get_trace(_id_arg(args["trace_id"], "trace_id"))),
+        "codex_memory_trace_events": lambda args: _with_service(lambda service: service.trace_events(_id_arg(args["trace_id"], "trace_id"), limit=_limit(args.get("limit", 100), maximum=500))),
+        "codex_memory_trace_summary": lambda args: _with_service(lambda service: service.trace_summary(_id_arg(args["trace_id"], "trace_id"))),
+        "codex_memory_trace_audit": lambda args: _with_service(lambda service: service.trace_audit()),
         "codex_memory_promote_dynamic_skill": lambda args: _with_service(
             lambda service: service.promote_dynamic_skill(_id_arg(args["skill_id"], "skill_id"), note=str(args.get("note") or ""))
         ),

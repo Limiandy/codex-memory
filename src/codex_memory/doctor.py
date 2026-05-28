@@ -16,6 +16,7 @@ from .benchmark import DEFAULT_BENCHMARK_FIXTURE
 from .config import Config, ensure_state_dir
 from .ledger import Ledger
 from .model_client import CodexMiniClient
+from .runtime_monitor import RuntimeMonitor
 
 
 def run_doctor(config: Config, model_check: bool = False, privacy: bool = False) -> dict[str, Any]:
@@ -28,6 +29,7 @@ def run_doctor(config: Config, model_check: bool = False, privacy: bool = False)
         "sqlite_ledger": _check_sqlite_ledger(config),
         "schema_migrations": _check_schema_migrations(config),
         "runtime_skill_governance": _check_runtime_skill_governance(config),
+        "runtime_trace": _check_runtime_trace(config),
         "codex_cli": _check_codex_cli(),
         "installed_plugin": _check_installed_plugin(),
         "raw_event_storage": _check_raw_event_storage(config),
@@ -155,6 +157,36 @@ def _check_runtime_skill_governance(config: Config) -> dict[str, Any]:
         )
     except Exception as exc:
         return _result("warn", False, error=str(exc), fix_hint="Check Ledger permissions and runtime skill governance records.")
+
+
+def _check_runtime_trace(config: Config) -> dict[str, Any]:
+    try:
+        ledger = Ledger(config.ledger_path)
+        try:
+            migration = ledger.runtime_trace_migration_status()
+            traces = ledger.list_traces(limit=5000)
+            audit = RuntimeMonitor(ledger, strict_privacy=config.strict_privacy, live_log=False).trace_audit()
+        finally:
+            ledger.close()
+        by_status: dict[str, int] = {}
+        for trace in traces:
+            status = str(trace.get("status") or "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+        return _result(
+            "info",
+            bool(migration.get("ok")),
+            migration=migration,
+            tables_present=bool(migration.get("ok")),
+            trace_count=len(traces),
+            by_status=by_status,
+            open_count=audit.get("open_count", 0),
+            failed_count=audit.get("failed_count", 0),
+            stale_open_count=len(audit.get("stale_open_traces") or []),
+            live_log_enabled=config.trace_live_log,
+            strict_privacy=config.strict_privacy,
+        )
+    except Exception as exc:
+        return _result("warn", False, error=str(exc), fix_hint="Open the Ledger with the current version to create runtime trace tables.")
 
 
 def _check_codex_cli() -> dict[str, Any]:
@@ -335,6 +367,7 @@ def _privacy_report(config: Config) -> dict[str, Any]:
             "runtime_observer_enabled": config.enable_runtime_observer,
             "runtime_observation_previews": "stored" if config.store_runtime_observation_previews else "redacted",
             "strict_privacy": config.strict_privacy,
+            "trace_live_log": config.trace_live_log,
             "runtime_observation_storage": "commands, file paths, exit code, source fields, output hashes/lengths, and failure flags; stdout/stderr previews only when explicitly enabled",
             "retention_policy": "manual; prune-events only removes events; prune-runtime removes runtime audit records and embedded workflow observation copies; wipe removes the full local Ledger",
             "recent_event_count": len(events),

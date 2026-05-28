@@ -16,6 +16,10 @@ from .taxonomy import enrich_candidate, near_duplicate_text
 
 
 _WIPE_TABLES = (
+    "runtime_trace_links",
+    "runtime_trace_events",
+    "runtime_trace_spans",
+    "runtime_traces",
     "runtime_state_transitions",
     "cognitive_edges",
     "cognitive_records",
@@ -30,6 +34,8 @@ _WIPE_TABLES = (
 
 RUNTIME_SKILL_GOVERNANCE_MIGRATION_VERSION = 2
 RUNTIME_SKILL_GOVERNANCE_MIGRATION_NAME = "runtime_skill_governance_shape"
+RUNTIME_TRACE_MIGRATION_VERSION = 3
+RUNTIME_TRACE_MIGRATION_NAME = "runtime_trace_flow_monitor"
 
 
 class Ledger:
@@ -199,6 +205,67 @@ class Ledger:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS runtime_traces (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                cwd TEXT,
+                project_key TEXT,
+                prompt_sha256 TEXT,
+                prompt_preview TEXT,
+                prompt_chars INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL,
+                root_event_id TEXT,
+                runtime_skill_injection_id TEXT,
+                workflow_id TEXT,
+                final_outcome TEXT,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                warning_count INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_trace_spans (
+                id TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                parent_span_id TEXT,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                duration_ms INTEGER,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_trace_events (
+                id TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                span_id TEXT,
+                name TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'info',
+                status TEXT,
+                message TEXT,
+                subject_type TEXT,
+                subject_id TEXT,
+                session_id TEXT,
+                turn_id TEXT,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS runtime_trace_links (
+                id TEXT PRIMARY KEY,
+                trace_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(trace_id, target_type, target_id, relation)
+            );
+
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -212,7 +279,12 @@ class Ledger:
         self._ensure_recall_event_columns()
         self._ensure_cognitive_record_columns()
         self._ensure_indexes()
+        self._ensure_runtime_trace_columns()
         self.run_runtime_skill_governance_migration()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+            (RUNTIME_TRACE_MIGRATION_VERSION, RUNTIME_TRACE_MIGRATION_NAME, _now()),
+        )
         self._commit()
 
     @contextmanager
@@ -320,6 +392,26 @@ class Ledger:
             "ok": migration is not None and int(legacy_count) == 0 and conflict_count == 0,
         }
 
+    def runtime_trace_migration_status(self) -> dict[str, Any]:
+        migration = self.conn.execute(
+            "SELECT version,name,applied_at FROM schema_migrations WHERE version=?",
+            (RUNTIME_TRACE_MIGRATION_VERSION,),
+        ).fetchone()
+        tables = {
+            row["name"]
+            for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        required = {"runtime_traces", "runtime_trace_spans", "runtime_trace_events", "runtime_trace_links"}
+        missing = sorted(required - tables)
+        return {
+            "version": RUNTIME_TRACE_MIGRATION_VERSION,
+            "name": RUNTIME_TRACE_MIGRATION_NAME,
+            "applied": migration is not None,
+            "applied_at": migration["applied_at"] if migration else None,
+            "missing_tables": missing,
+            "ok": migration is not None and not missing,
+        }
+
     def _ensure_memory_columns(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(memories)").fetchall()}
         if "supersedes_id" not in columns:
@@ -353,6 +445,14 @@ class Ledger:
         if "strength" not in columns:
             self.conn.execute("ALTER TABLE memories ADD COLUMN strength REAL NOT NULL DEFAULT 1.0")
         self._ensure_governance_policy_columns()
+
+    def _ensure_runtime_trace_columns(self) -> None:
+        tables = {
+            row["name"]
+            for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if not {"runtime_traces", "runtime_trace_spans", "runtime_trace_events", "runtime_trace_links"}.issubset(tables):
+            return
 
     def _ensure_governance_policy_columns(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(governance_policies)").fetchall()}
@@ -444,8 +544,270 @@ class Ledger:
             CREATE INDEX IF NOT EXISTS idx_cognitive_edges_source ON cognitive_edges(source_id);
             CREATE INDEX IF NOT EXISTS idx_cognitive_edges_target ON cognitive_edges(target_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_state_subject ON runtime_state_transitions(subject_type,subject_id,created_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_turn ON runtime_traces(session_id,turn_id,updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_traces_status ON runtime_traces(status,updated_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_trace_spans_trace ON runtime_trace_spans(trace_id,started_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_trace_events_trace ON runtime_trace_events(trace_id,created_at);
+            CREATE INDEX IF NOT EXISTS idx_runtime_trace_links_trace ON runtime_trace_links(trace_id,target_type,target_id);
             """
         )
+
+    def record_trace(
+        self,
+        trace_id: str,
+        session_id: str | None,
+        turn_id: str | None,
+        cwd: str | None,
+        project_key: str | None,
+        prompt_sha256: str | None,
+        prompt_preview: str | None,
+        prompt_chars: int,
+        status: str = "started",
+        root_event_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO runtime_traces(
+                id,session_id,turn_id,cwd,project_key,prompt_sha256,prompt_preview,prompt_chars,
+                status,started_at,updated_at,root_event_id,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                trace_id,
+                session_id,
+                turn_id,
+                cwd,
+                project_key,
+                prompt_sha256,
+                prompt_preview,
+                int(prompt_chars or 0),
+                status,
+                now,
+                now,
+                root_event_id,
+                json.dumps(metadata or {}, ensure_ascii=False),
+            ),
+        )
+        self._commit()
+        return self.get_trace(trace_id) or {}
+
+    def latest_trace(self, session_id: str | None = None, turn_id: str | None = None) -> dict[str, Any] | None:
+        where = []
+        params: list[Any] = []
+        if session_id:
+            where.append("session_id=?")
+            params.append(session_id)
+        if turn_id:
+            where.append("turn_id=?")
+            params.append(turn_id)
+        sql = "SELECT * FROM runtime_traces"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC, started_at DESC LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return _trace_row_to_dict(row) if row else None
+
+    def get_trace(self, trace_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM runtime_traces WHERE id=?", (trace_id,)).fetchone()
+        return _trace_row_to_dict(row) if row else None
+
+    def list_traces(self, session_id: str | None = None, turn_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        where = []
+        params: list[Any] = []
+        if session_id:
+            where.append("session_id=?")
+            params.append(session_id)
+        if turn_id:
+            where.append("turn_id=?")
+            params.append(turn_id)
+        sql = "SELECT * FROM runtime_traces"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC, started_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        return [_trace_row_to_dict(row) for row in self.conn.execute(sql, params).fetchall()]
+
+    def update_trace(self, trace_id: str, **fields: Any) -> dict[str, Any] | None:
+        trace = self.get_trace(trace_id)
+        if not trace:
+            return None
+        allowed = {
+            "status",
+            "completed_at",
+            "root_event_id",
+            "runtime_skill_injection_id",
+            "workflow_id",
+            "final_outcome",
+            "error_count",
+            "warning_count",
+        }
+        updates = []
+        params: list[Any] = []
+        metadata_patch = fields.pop("metadata", None)
+        for key, value in fields.items():
+            if key in allowed:
+                updates.append(f"{key}=?")
+                params.append(value)
+        if isinstance(metadata_patch, dict):
+            metadata = dict(trace.get("metadata_json") or {})
+            metadata.update(metadata_patch)
+            updates.append("metadata_json=?")
+            params.append(json.dumps(metadata, ensure_ascii=False))
+        updates.append("updated_at=?")
+        params.append(_now())
+        params.append(trace_id)
+        self.conn.execute(f"UPDATE runtime_traces SET {', '.join(updates)} WHERE id=?", params)
+        self._commit()
+        return self.get_trace(trace_id)
+
+    def complete_trace(self, trace_id: str, final_outcome: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        return self.update_trace(trace_id, status="completed", completed_at=_now(), final_outcome=final_outcome, metadata=metadata or {})
+
+    def fail_trace(self, trace_id: str, final_outcome: str = "failure", metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        trace = self.get_trace(trace_id)
+        error_count = int((trace or {}).get("error_count") or 0) + 1
+        return self.update_trace(trace_id, status="failed", completed_at=_now(), final_outcome=final_outcome, error_count=error_count, metadata=metadata or {})
+
+    def record_trace_span(
+        self,
+        trace_id: str,
+        name: str,
+        status: str = "started",
+        parent_span_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        span_id = _id("span")
+        now = _now()
+        self.conn.execute(
+            "INSERT INTO runtime_trace_spans(id,trace_id,parent_span_id,name,status,started_at,metadata_json) VALUES(?,?,?,?,?,?,?)",
+            (span_id, trace_id, parent_span_id, name, status, now, json.dumps(metadata or {}, ensure_ascii=False)),
+        )
+        self._commit()
+        return self.get_trace_span(span_id) or {}
+
+    def get_trace_span(self, span_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM runtime_trace_spans WHERE id=?", (span_id,)).fetchone()
+        return _trace_span_row_to_dict(row) if row else None
+
+    def end_trace_span(self, span_id: str, status: str = "completed", metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        span = self.get_trace_span(span_id)
+        if not span:
+            return None
+        ended_at = _now()
+        duration_ms = _duration_ms(str(span.get("started_at") or ""), ended_at)
+        merged = dict(span.get("metadata_json") or {})
+        merged.update(metadata or {})
+        self.conn.execute(
+            "UPDATE runtime_trace_spans SET status=?, ended_at=?, duration_ms=?, metadata_json=? WHERE id=?",
+            (status, ended_at, duration_ms, json.dumps(merged, ensure_ascii=False), span_id),
+        )
+        self._commit()
+        return self.get_trace_span(span_id)
+
+    def list_trace_spans(self, trace_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM runtime_trace_spans WHERE trace_id=? ORDER BY started_at ASC", (trace_id,)).fetchall()
+        return [_trace_span_row_to_dict(row) for row in rows]
+
+    def record_trace_event(
+        self,
+        trace_id: str,
+        name: str,
+        span_id: str | None = None,
+        severity: str = "info",
+        status: str | None = None,
+        message: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_id = _id("tev")
+        now = _now()
+        self.conn.execute(
+            """
+            INSERT INTO runtime_trace_events(
+                id,trace_id,span_id,name,severity,status,message,subject_type,subject_id,
+                session_id,turn_id,created_at,metadata_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                event_id,
+                trace_id,
+                span_id,
+                name,
+                severity,
+                status,
+                message,
+                subject_type,
+                subject_id,
+                session_id,
+                turn_id,
+                now,
+                json.dumps(metadata or {}, ensure_ascii=False),
+            ),
+        )
+        if severity == "error":
+            self.conn.execute("UPDATE runtime_traces SET error_count=error_count+1 WHERE id=?", (trace_id,))
+        elif severity == "warn":
+            self.conn.execute("UPDATE runtime_traces SET warning_count=warning_count+1 WHERE id=?", (trace_id,))
+        self.update_trace(trace_id)
+        return self.get_trace_event(event_id) or {}
+
+    def get_trace_event(self, event_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM runtime_trace_events WHERE id=?", (event_id,)).fetchone()
+        return _trace_event_row_to_dict(row) if row else None
+
+    def list_trace_events(self, trace_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM runtime_trace_events WHERE trace_id=? ORDER BY created_at ASC LIMIT ?",
+            (trace_id, max(1, min(int(limit), 5000))),
+        ).fetchall()
+        return [_trace_event_row_to_dict(row) for row in rows]
+
+    def link_trace(self, trace_id: str, target_type: str, target_id: str, relation: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        link_id = _id("tlink")
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO runtime_trace_links(id,trace_id,target_type,target_id,relation,created_at,metadata_json)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (link_id, trace_id, target_type, target_id, relation, _now(), json.dumps(metadata or {}, ensure_ascii=False)),
+        )
+        self._commit()
+        return {"id": link_id, "trace_id": trace_id, "target_type": target_type, "target_id": target_id, "relation": relation, "metadata_json": metadata or {}}
+
+    def list_trace_links(self, trace_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM runtime_trace_links WHERE trace_id=? ORDER BY created_at ASC", (trace_id,)).fetchall()
+        return [_trace_link_row_to_dict(row) for row in rows]
+
+    def export_trace(self, trace_id: str) -> dict[str, Any] | None:
+        trace = self.get_trace(trace_id)
+        if not trace:
+            return None
+        return {
+            "trace": trace,
+            "spans": self.list_trace_spans(trace_id),
+            "events": self.list_trace_events(trace_id, limit=5000),
+            "links": self.list_trace_links(trace_id),
+        }
+
+    def prune_traces(self, older_than_days: int | None = None) -> dict[str, Any]:
+        cutoff = _cutoff(older_than_days)
+        if cutoff:
+            rows = self.conn.execute("SELECT id FROM runtime_traces WHERE updated_at < ?", (cutoff,)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT id FROM runtime_traces").fetchall()
+        trace_ids = [str(row["id"]) for row in rows]
+        with self.transaction():
+            for trace_id in trace_ids:
+                self.conn.execute("DELETE FROM runtime_trace_links WHERE trace_id=?", (trace_id,))
+                self.conn.execute("DELETE FROM runtime_trace_events WHERE trace_id=?", (trace_id,))
+                self.conn.execute("DELETE FROM runtime_trace_spans WHERE trace_id=?", (trace_id,))
+                self.conn.execute("DELETE FROM runtime_traces WHERE id=?", (trace_id,))
+        return {"deleted_traces": len(trace_ids)}
 
     def add_event(self, event_type: str, payload: dict[str, Any]) -> str:
         event_id = _id("evt")
@@ -839,6 +1201,7 @@ class Ledger:
             session_id=injection.get("session_id"),
             metadata={
                 "injection_id": injection_id,
+                "trace_id": metadata.get("trace_id"),
                 "outcome": outcome,
                 "dimensions": dimensions,
                 "evidence": evidence,
@@ -849,15 +1212,56 @@ class Ledger:
             source_kind="runtime_skill_feedback",
         )
         should_adjust_seed_strength = bool(evidence.get("adjust_seed_skill_strength", True))
+        trace_id = str(metadata.get("trace_id") or "")
         if should_adjust_seed_strength and outcome in {"positive", "success", "negative", "failure"}:
             success = outcome in {"positive", "success"}
             for seed_id in metadata.get("seed_skill_ids") or []:
                 self._record_seed_skill_feedback(str(seed_id), success)
+                if trace_id:
+                    seed = self.get_cognitive_record(str(seed_id)) or {}
+                    seed_metadata = seed.get("metadata_json") or {}
+                    self.record_trace_event(
+                        trace_id,
+                        "seed_skill_adjusted",
+                        severity="info",
+                        subject_type="seed_skill",
+                        subject_id=str(seed_id),
+                        metadata={
+                            "skill_id": str(seed_id),
+                            "success": success,
+                            "reuse_count": seed_metadata.get("reuse_count"),
+                            "success_count": seed_metadata.get("success_count"),
+                            "failure_count": seed_metadata.get("failure_count"),
+                            "new_trust_state": seed_metadata.get("trust_state"),
+                            "new_status": seed.get("status"),
+                        },
+                    )
+                    self.link_trace(trace_id, "seed_skill", str(seed_id), "adjusted")
         should_adjust_durable_strength = bool(evidence.get("adjust_durable_skill_strength", False))
         if should_adjust_durable_strength and outcome in {"positive", "success", "negative", "failure"}:
             success = outcome in {"positive", "success"}
             for skill_id in metadata.get("durable_skill_ids") or []:
                 self._record_durable_skill_feedback(str(skill_id), success)
+                if trace_id:
+                    skill = self.get_cognitive_record(str(skill_id)) or {}
+                    skill_metadata = skill.get("metadata_json") or {}
+                    self.record_trace_event(
+                        trace_id,
+                        "durable_skill_adjusted",
+                        severity="warn" if skill.get("status") == "suppressed" else "info",
+                        subject_type="durable_skill",
+                        subject_id=str(skill_id),
+                        metadata={
+                            "skill_id": str(skill_id),
+                            "success": success,
+                            "reuse_count": skill_metadata.get("reuse_count"),
+                            "success_count": skill_metadata.get("success_count"),
+                            "failure_count": skill_metadata.get("failure_count"),
+                            "new_trust_state": skill_metadata.get("trust_state"),
+                            "new_status": skill.get("status"),
+                        },
+                    )
+                    self.link_trace(trace_id, "durable_skill", str(skill_id), "adjusted")
         return feedback
 
     def _record_seed_skill_feedback(self, seed_id: str, success: bool) -> None:
@@ -1648,6 +2052,10 @@ class Ledger:
             "cognitive_records": self.list_cognitive_records(limit=limit),
             "cognitive_edges": self.list_cognitive_edges(limit=limit),
             "runtime_state_transitions": self.latest_state_transitions(limit=limit),
+            "runtime_traces": self.list_traces(limit=limit),
+            "runtime_trace_spans": _select_json_rows(self.conn, "runtime_trace_spans", limit),
+            "runtime_trace_events": _select_json_rows(self.conn, "runtime_trace_events", limit),
+            "runtime_trace_links": _select_json_rows(self.conn, "runtime_trace_links", limit),
         }
 
     def wipe_all(self) -> dict[str, Any]:
@@ -1876,12 +2284,63 @@ def _state_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _trace_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
+    return data
+
+
+def _trace_span_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
+    return data
+
+
+def _trace_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
+    return data
+
+
+def _trace_link_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    try:
+        data["metadata_json"] = json.loads(data["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        data["metadata_json"] = {}
+    return data
+
+
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _duration_ms(started_at: str, ended_at: str) -> int | None:
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int((ended - started).total_seconds() * 1000)
+
+
+def _cutoff(older_than_days: int | None) -> str | None:
+    if older_than_days is None:
+        return None
+    return (datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=older_than_days)).isoformat().replace("+00:00", "Z")
 
 
 def _record_age_minutes(record: dict[str, Any]) -> float:
@@ -1958,6 +2417,21 @@ def _json_obj(raw: Any) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _select_json_rows(conn: sqlite3.Connection, table: str, limit: int) -> list[dict[str, Any]]:
+    rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?", (max(1, min(int(limit), 20000)),)).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        for key, value in list(item.items()):
+            if key.endswith("_json"):
+                try:
+                    item[key] = json.loads(value or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    item[key] = {}
+        result.append(item)
+    return result
 
 
 def _normalized_seed_skill_state(status: str, metadata: dict[str, Any]) -> tuple[str, dict[str, Any]]:

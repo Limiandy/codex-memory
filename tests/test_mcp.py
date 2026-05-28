@@ -45,6 +45,11 @@ class McpTest(unittest.TestCase):
                 self.assertIn("codex_memory_seed_skills", names)
                 self.assertIn("codex_memory_seed_skill_stats", names)
                 self.assertIn("codex_memory_dynamic_skills", names)
+                self.assertIn("codex_memory_traces", names)
+                self.assertIn("codex_memory_trace_show", names)
+                self.assertIn("codex_memory_trace_events", names)
+                self.assertIn("codex_memory_trace_summary", names)
+                self.assertIn("codex_memory_trace_audit", names)
                 self.assertIn("codex_memory_promote_dynamic_skill", names)
                 self.assertIn("codex_memory_disable_seed_skill", names)
                 self.assertIn("codex_memory_promote", names)
@@ -69,7 +74,22 @@ class McpTest(unittest.TestCase):
             env = {
                 "PYTHONPATH": "src",
                 "CODEX_MEMORY_STATE_DIR": tmp,
+                "CODEX_MEMORY_FAKE_MODEL": "1",
             }
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from codex_memory.config import load_config; from codex_memory.service import MemoryService; s=MemoryService(load_config()); s.prompt_context('帮我画一个品牌 logo', session_id='s1', turn_id='t1'); s.close()",
+                ],
+                cwd=".",
+                env={**os.environ, **env},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=True,
+            )
             proc = subprocess.Popen(
                 [sys.executable, "-m", "codex_memory.mcp_server"],
                 cwd=".",
@@ -126,6 +146,18 @@ class McpTest(unittest.TestCase):
                         "method": "tools/call",
                         "params": {"name": "codex_memory_seed_skill_stats", "arguments": {}},
                     },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 9,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_traces", "arguments": {"limit": 5}},
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 10,
+                        "method": "tools/call",
+                        "params": {"name": "codex_memory_trace_audit", "arguments": {}},
+                    },
                 ]
                 for call in calls:
                     proc.stdin.write(json.dumps(call) + "\n")
@@ -138,6 +170,8 @@ class McpTest(unittest.TestCase):
                 dynamic_stats = json.loads(proc.stdout.readline())
                 runtime_audit = json.loads(proc.stdout.readline())
                 seed_stats = json.loads(proc.stdout.readline())
+                trace_list = json.loads(proc.stdout.readline())
+                trace_audit = json.loads(proc.stdout.readline())
                 status_text = json.loads(status["result"]["content"][0]["text"])
                 queue_text = json.loads(queue["result"]["content"][0]["text"])
                 runtime_status_text = json.loads(runtime_status["result"]["content"][0]["text"])
@@ -145,6 +179,8 @@ class McpTest(unittest.TestCase):
                 dynamic_stats_text = json.loads(dynamic_stats["result"]["content"][0]["text"])
                 runtime_audit_text = json.loads(runtime_audit["result"]["content"][0]["text"])
                 seed_stats_text = json.loads(seed_stats["result"]["content"][0]["text"])
+                trace_list_text = json.loads(trace_list["result"]["content"][0]["text"])
+                trace_audit_text = json.loads(trace_audit["result"]["content"][0]["text"])
                 self.assertEqual(status_text["store"]["primary"], "ledger")
                 self.assertFalse(status_text["privacy"]["store_raw_events"])
                 self.assertTrue(status_text["privacy"]["runtime_observer_enabled"])
@@ -155,6 +191,28 @@ class McpTest(unittest.TestCase):
                 self.assertIn("recent_candidates", dynamic_stats_text)
                 self.assertIn("injection_count", runtime_audit_text)
                 self.assertIn("by_trust_state", seed_stats_text)
+                self.assertGreaterEqual(len(trace_list_text), 1)
+                self.assertIn("trace_count", trace_audit_text)
+                trace_id = trace_list_text[0]["id"]
+                for index, name in enumerate(("codex_memory_trace_show", "codex_memory_trace_events", "codex_memory_trace_summary"), start=11):
+                    proc.stdin.write(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": index,
+                                "method": "tools/call",
+                                "params": {"name": name, "arguments": {"trace_id": trace_id}},
+                            }
+                        )
+                        + "\n"
+                    )
+                proc.stdin.flush()
+                trace_show = json.loads(proc.stdout.readline())
+                trace_events = json.loads(proc.stdout.readline())
+                trace_summary = json.loads(proc.stdout.readline())
+                self.assertIn("trace", json.loads(trace_show["result"]["content"][0]["text"]))
+                self.assertIsInstance(json.loads(trace_events["result"]["content"][0]["text"]), list)
+                self.assertIn("runtime_skill", json.loads(trace_summary["result"]["content"][0]["text"]))
                 self.assertTrue((Path(tmp) / "ledger.sqlite3").exists())
             finally:
                 for stream in (proc.stdin, proc.stdout, proc.stderr):

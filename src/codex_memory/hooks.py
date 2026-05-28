@@ -70,6 +70,8 @@ def _session_start(service: MemoryService, payload: dict[str, Any]) -> int:
 
 def _user_message(service: MemoryService, payload: dict[str, Any]) -> int:
     event_id = service.record_event("user_message", payload)
+    trace = service.start_trace_from_payload(payload, event_id=event_id)
+    payload["_codex_memory_trace_id"] = trace.trace_id
     runtime_task = service.start_task_from_prompt(payload)
     logger.debug("user_message event recorded", event_id=event_id, payload_summary=summarize_payload(payload))
     _spawn_worker(event_id)

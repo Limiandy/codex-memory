@@ -13,6 +13,7 @@ This is a local developer beta for local Codex use. It is intended for developer
 - `cognitive-runtime`: observes `UserPromptSubmit`, `PostToolUse`, and `Stop` events to maintain workflow state and inject next-step control signals.
 - `workflow-guard`: detects engineering workflow violations such as code changes without verification evidence.
 - `skill-synthesizer`: turns successful observed workflows and related experience memories into reusable dynamic skills.
+- `runtime-trace`: records a local full-flow trace from user prompt through Runtime Skill generation, injection, workflow observation, Stop audit, feedback, and skill governance updates.
 - `mcp`: exposes local memory, Runtime Skill, seed skill, dynamic skill, and runtime governance tools.
 
 The local SQLite Ledger is the only runtime store and source of truth.
@@ -49,6 +50,8 @@ Runtime Skill lifecycle:
 ./scripts/codex-memory runtime-skills list
 ./scripts/codex-memory dynamic-skills list --status candidate
 ./scripts/codex-memory dynamic-skills stats
+./scripts/codex-memory traces list
+./scripts/codex-memory traces summary <trace_id>
 ./scripts/codex-memory runtime-benchmark
 ./scripts/codex-memory runtime-benchmark --fail-under-defaults
 ./scripts/codex-memory export --output ~/codex-memory-export.json
@@ -191,6 +194,29 @@ Runtime and seed skill governance:
 
 Runtime Skill feedback attribution is rule-first. Ambiguous or multi-target feedback can use a short model check; set `CODEX_MEMORY_FEEDBACK_MODEL=0` to keep attribution purely deterministic. `runtime-benchmark` reads the maintained explicit benchmark fixture by default and supports `--synthetic` for the generated regression set.
 
+Runtime Trace flow monitor:
+
+```bash
+./scripts/codex-memory traces list --session-id <session_id>
+./scripts/codex-memory traces show <trace_id>
+./scripts/codex-memory traces events <trace_id>
+./scripts/codex-memory traces summary <trace_id>
+./scripts/codex-memory traces audit
+./scripts/codex-memory traces export <trace_id>
+./scripts/codex-memory traces prune --older-than-days 30
+```
+
+Trace records are stored in dedicated local tables (`runtime_traces`, `runtime_trace_spans`, `runtime_trace_events`, and `runtime_trace_links`). They link user prompts to skill need decisions, recall skips, memory/durable/seed basis retrieval, Runtime Skill synthesis and review, injections, tool observations, Stop audits, feedback records, and seed/durable skill adjustments. `doctor` reports trace table migration state, trace counts by status, stale/open/failed trace health, and whether live trace logging is enabled.
+
+Live trace logging is disabled by default. Enable it only for local observation:
+
+```bash
+export CODEX_MEMORY_TRACE_LIVE_LOG=1
+# Then use Codex normally; hook-created trace events are printed to stderr.
+```
+
+When enabled for a process that creates trace events, trace events are emitted to `stderr` as JSONL and are not written to a separate log file.
+
 ## Uninstall
 
 Disable the plugin but keep files:
@@ -252,7 +278,7 @@ Strict privacy mode further minimizes local runtime data:
 CODEX_MEMORY_STRICT_PRIVACY=1 ./scripts/codex-memory doctor --privacy
 ```
 
-In strict privacy mode, prompt previews are replaced with hashes, runtime observation commands and changed paths are hashed, Runtime Skill injection records keep only compact skill metadata and basis ids, stdout/stderr previews stay disabled, and exports omit seed skill content.
+In strict privacy mode, prompt previews are replaced with hashes, trace records omit raw cwd/project keys, runtime observation commands and changed paths are hashed, Runtime Skill injection records keep only compact skill metadata and basis ids, feedback prompt evidence is hash/count only, stdout/stderr previews stay disabled, live trace logs use the same minimized metadata, and exports omit seed skill content.
 
 Raw event storage is opt-in and should only be used for local debugging:
 
@@ -274,7 +300,7 @@ The legacy `CODEX_MEMORY_ENABLE_DANGEROUS_MCP_TOOLS=1` enables all three groups 
 
 ## Experimental CLI
 
-The public beta command surface is focused on local memory, runtime skills, and observed runtime guardrails: `status`, `runtime-status`, `runtime-benchmark`, `doctor`, `ingest`, `search`, `queue`, `runtime-skills`, `seed-skills`, `dynamic-skills`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
+The public beta command surface is focused on local memory, runtime skills, traces, and observed runtime guardrails: `status`, `runtime-status`, `runtime-benchmark`, `doctor`, `ingest`, `search`, `queue`, `runtime-skills`, `seed-skills`, `dynamic-skills`, `traces`, `promote`, `reject`, `delete`, `recall-feedback`, `expire`, `audit`, `export`, `prune-events`, `prune-runtime`, `wipe`, `plugin`, `govern`, and `govern-periodic`.
 
 Experimental cognitive, knowledge, skill, and workflow commands are hidden behind an explicit environment switch:
 

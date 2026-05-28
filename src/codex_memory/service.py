@@ -22,6 +22,7 @@ from .memory_retriever import CleanMemoryRetriever
 from .recall import MemoryRecall
 from .review import MemoryReviewer
 from .runtime_skill import RuntimeSkillInjector, RuntimeSkillReviewer, RuntimeSkillSynthesizer
+from .runtime_monitor import RuntimeMonitor, TraceContext
 from .security import sanitize_payload, summarize_payload, summarize_candidate
 from .seed_skills import AgencySkillSeeder, DEFAULT_AGENCY_AGENTS_REPO
 from .skill_need import SkillNeedClassifier
@@ -42,6 +43,7 @@ class MemoryService:
             strict_privacy=config.strict_privacy,
         )
         self.store = LocalCognitiveStore(self.ledger)
+        self.monitor = RuntimeMonitor(self.ledger, strict_privacy=config.strict_privacy, live_log=config.trace_live_log)
         self._runtime_skill_cache: dict[str, tuple[Any, dict[str, Any]]] = {}
 
     def close(self) -> None:
@@ -191,6 +193,23 @@ class MemoryService:
         logger.debug("event recorded", event_id=event_id, event_type=event_type, processed=processed, payload_summary=summarize_payload(payload))
         return event_id
 
+    def start_trace_from_payload(self, payload: dict[str, Any], event_id: str | None = None) -> TraceContext:
+        prompt = str(payload.get("prompt") or payload.get("text") or "")
+        context = self.monitor.start_trace(
+            prompt,
+            session_id=str(payload.get("session_id") or "") or None,
+            turn_id=str(payload.get("turn_id") or "") or None,
+            cwd=str(payload.get("cwd") or "") or None,
+            root_event_id=event_id,
+            metadata={
+                "hook": payload.get("hook_event_name") or "UserPromptSubmit",
+                "permission_mode": payload.get("permission_mode"),
+                "model": payload.get("model"),
+            },
+        )
+        self.monitor.event(context, "user_prompt_received", metadata={"prompt_chars": len(prompt)})
+        return context
+
     def start_task_from_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.config.enable_runtime_observer:
             return {"started": False, "reason": "runtime_observer_disabled"}
@@ -198,21 +217,38 @@ class MemoryService:
 
     def observe_tool_use(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_id = self.record_event("after_tool_call", payload, processed=True)
+        trace = self.monitor.get_or_start_trace(
+            "",
+            session_id=str(payload.get("session_id") or "") or None,
+            turn_id=str(payload.get("turn_id") or "") or None,
+            cwd=str(payload.get("cwd") or "") or None,
+            root_event_id=event_id,
+        )
         if not self.config.enable_runtime_observer:
             return {"observed": False, "reason": "runtime_observer_disabled", "event_id": event_id, "hook_output": {}}
         result = self.runtime.observe_tool_use(payload)
         result["event_id"] = event_id
+        self._trace_tool_observation(trace, result)
         return result
 
     def observe_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
         event_id = self.record_event("session_end", payload, processed=True)
+        trace = self.monitor.get_or_start_trace(
+            "",
+            session_id=str(payload.get("session_id") or "") or None,
+            turn_id=str(payload.get("turn_id") or "") or None,
+            cwd=str(payload.get("cwd") or "") or None,
+            root_event_id=event_id,
+        )
         if not self.config.enable_runtime_observer:
             return {"observed": False, "reason": "runtime_observer_disabled", "event_id": event_id, "hook_output": {}}
         result = self.runtime.observe_stop(payload)
         result["event_id"] = event_id
+        self._trace_stop(trace, result)
         feedback = self._record_runtime_skill_workflow_feedback(payload, result)
         if feedback:
             result["runtime_skill_feedback"] = feedback
+            self._trace_feedback(trace, feedback, source="workflow_stop")
         return result
 
     def _stored_event_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -230,12 +266,17 @@ class MemoryService:
         session_id: str | None = None,
         turn_id: str | None = None,
     ) -> str:
+        trace = self.monitor.get_or_start_trace(prompt, session_id=session_id, turn_id=turn_id, cwd=cwd)
+        self.monitor.event(trace, "prompt_context_started")
         total_started = time.perf_counter()
         budget = MemoryGovernance(self.ledger).injection_budget(prompt, limit)
         limit = int(budget["limit"])
         skill_need_started = time.perf_counter()
+        skill_span = self.monitor.start_span(trace, "skill_need")
         skill_decision = SkillNeedClassifier(self.model).classify(prompt)
         skill_need_latency_ms = _elapsed_ms(skill_need_started)
+        self.monitor.event(trace, "skill_need_decision", span_id=str(skill_span["id"]), metadata=skill_decision.to_dict())
+        self.monitor.end_span(str(skill_span["id"]), metadata={"duration_ms": skill_need_latency_ms})
         active_workflow = self.runtime.active_workflow_for_session(session_id=session_id, turn_id=turn_id, cwd=cwd) if self.config.enable_runtime_observer else None
         if (
             not skill_decision.skill_needed
@@ -244,34 +285,94 @@ class MemoryService:
             and _prompt_can_skip_recall(prompt, skill_decision.intent)
         ):
             logger.debug("prompt context skipped", prompt_chars=len(prompt), reason="direct_answer_without_memory_need")
+            self.monitor.event(trace, "recall_skipped", metadata={"reason": "direct_answer_without_memory_need", "intent": skill_decision.intent})
+            self.monitor.complete_trace(trace, final_outcome="direct_answer_no_runtime_skill")
             return ""
 
         recall_started = time.perf_counter()
+        recall_span = self.monitor.start_span(trace, "memory_recall")
         memories = self.ledger.list_recallable_memories(cwd=cwd, session_id=session_id, limit=200)
         edges = self.ledger.list_edges([str(item["id"]) for item in memories if item.get("id")])
         result = MemoryRecall(memories, edges=edges).recall(prompt, limit=limit)
         recall_id = self.ledger.record_recall(prompt, result.route, result.memories, cwd=cwd, session_id=session_id, turn_id=turn_id)
         memory_retrieval_latency_ms = _elapsed_ms(recall_started)
+        recalled_ids = [str(item.get("id")) for item in result.memories if item.get("id")]
+        self.monitor.event(trace, "memory_recall_completed", span_id=str(recall_span["id"]), subject_type="recall", subject_id=recall_id, metadata={"route": result.route, "memory_count": len(recalled_ids), "memory_ids": recalled_ids, "recall_id": recall_id})
+        self.monitor.link(trace, "recall", recall_id, "created")
+        for memory_id in recalled_ids:
+            self.monitor.link(trace, "memory", memory_id, "used")
+        self.monitor.end_span(str(recall_span["id"]), metadata={"duration_ms": memory_retrieval_latency_ms})
         runtime_skill_context = ""
         runtime_skill = None
         cache_hit = False
         fallback_count = 0
         if skill_decision.skill_needed:
             basis_started = time.perf_counter()
+            basis_span = self.monitor.start_span(trace, "basis_retrieval")
             memory_basis = CleanMemoryRetriever(self.ledger).retrieve(prompt, cwd=cwd, session_id=session_id, limit=limit)
             memory_retrieval_latency_ms += _elapsed_ms(basis_started)
+            memory_basis_ids = [str(item.get("id")) for item in memory_basis.get("memories") or [] if item.get("id")]
+            durable_skill_ids = [str(item.get("id")) for item in memory_basis.get("durable_skills") or [] if item.get("id")]
+            seed_skill_ids = [str(item.get("id")) for item in memory_basis.get("seed_skills") or [] if item.get("id")]
+            basis_metadata = {
+                "memory_basis_ids": memory_basis_ids,
+                "durable_skill_ids": durable_skill_ids,
+                "seed_skill_ids": seed_skill_ids,
+                "memory_basis_count": len(memory_basis_ids),
+                "durable_skill_count": len(durable_skill_ids),
+                "seed_skill_count": len(seed_skill_ids),
+            }
+            self.monitor.event(trace, "basis_retrieved", span_id=str(basis_span["id"]), metadata=basis_metadata)
+            for memory_id in memory_basis_ids:
+                self.monitor.link(trace, "memory", memory_id, "used")
+            for skill_id in durable_skill_ids:
+                self.monitor.link(trace, "durable_skill", skill_id, "used")
+            for seed_id in seed_skill_ids:
+                self.monitor.link(trace, "seed_skill", seed_id, "used")
+            self.monitor.end_span(str(basis_span["id"]))
             cache_key = _runtime_skill_cache_key(prompt, memory_basis, model=self.config.model, strict_privacy=self.config.strict_privacy)
             cached = self._runtime_skill_cache.get(cache_key)
             if cached:
                 runtime_skill, review = cached
                 cache_hit = True
+                self.monitor.event(trace, "runtime_skill_cache_hit", metadata={"cache_hit": True})
             else:
                 synthesis_started = time.perf_counter()
+                synthesis_span = self.monitor.start_span(trace, "runtime_skill_synthesis")
                 runtime_skill = RuntimeSkillSynthesizer(self.model).synthesize(prompt, skill_decision, memory_basis)
                 skill_synthesis_latency_ms = _elapsed_ms(synthesis_started)
+                self.monitor.event(
+                    trace,
+                    "runtime_skill_synthesized",
+                    span_id=str(synthesis_span["id"]),
+                    metadata={
+                        "skill_name": getattr(runtime_skill, "name", None),
+                        "intent": getattr(runtime_skill, "intent", None),
+                        "domain": getattr(runtime_skill, "domain", None),
+                        "confidence": getattr(runtime_skill, "confidence", None),
+                        "cache_hit": False,
+                    },
+                )
+                self.monitor.end_span(str(synthesis_span["id"]), metadata={"duration_ms": skill_synthesis_latency_ms})
                 review_started = time.perf_counter()
+                review_span = self.monitor.start_span(trace, "runtime_skill_review")
                 review = RuntimeSkillReviewer().review(runtime_skill, skill_decision, memory_basis)
                 review_latency_ms = _elapsed_ms(review_started)
+                self.monitor.event(
+                    trace,
+                    "runtime_skill_reviewed",
+                    span_id=str(review_span["id"]),
+                    metadata={
+                        "review_status": review.get("status"),
+                        "reasons": review.get("reasons") or [],
+                        "risk_flags": review.get("risk_flags") or [],
+                        "basis_precedence": review.get("basis_precedence"),
+                    },
+                    severity="warn" if review.get("status") in {"fallback", "dropped"} else "info",
+                )
+                if review.get("status") == "dropped":
+                    self.monitor.event(trace, "runtime_skill_dropped", span_id=str(review_span["id"]), severity="warn", metadata={"reasons": review.get("reasons") or []})
+                self.monitor.end_span(str(review_span["id"]), metadata={"duration_ms": review_latency_ms})
                 runtime_skill = review.get("skill")
                 if runtime_skill and review.get("status") in {"approved", "fallback"}:
                     self._runtime_skill_cache[cache_key] = (runtime_skill, review)
@@ -283,6 +384,7 @@ class MemoryService:
             runtime_skill = review.get("skill")
             runtime_skill_context = RuntimeSkillInjector().format(runtime_skill)
             if runtime_skill_context and runtime_skill:
+                injection_span = self.monitor.start_span(trace, "runtime_skill_injection")
                 injection = self.ledger.record_runtime_skill_injection(
                     prompt,
                     runtime_skill.to_dict(),
@@ -295,6 +397,7 @@ class MemoryService:
                 self.ledger.patch_cognitive_record_metadata(
                     str(injection["id"]),
                     {
+                        "trace_id": trace.trace_id,
                         "review": {
                             "status": review.get("status"),
                             "reasons": review.get("reasons") or [],
@@ -313,10 +416,42 @@ class MemoryService:
                         },
                     },
                 )
+                latency = {
+                    "skill_need_latency_ms": skill_need_latency_ms,
+                    "memory_retrieval_latency_ms": memory_retrieval_latency_ms,
+                    "skill_synthesis_latency_ms": skill_synthesis_latency_ms,
+                    "review_latency_ms": review_latency_ms,
+                    "total_prompt_context_latency_ms": _elapsed_ms(total_started),
+                    "model_timeout_count": 0,
+                    "fallback_count": fallback_count,
+                    "cache_hit": cache_hit,
+                }
+                self.monitor.event(
+                    trace,
+                    "runtime_skill_injected",
+                    span_id=str(injection_span["id"]),
+                    subject_type="runtime_skill_injection",
+                    subject_id=str(injection["id"]),
+                    metadata={
+                        "injection_id": str(injection["id"]),
+                        "skill_name": runtime_skill.name,
+                        "memory_basis_ids": runtime_skill.memory_basis_ids,
+                        "durable_skill_ids": runtime_skill.durable_skill_ids,
+                        "seed_skill_ids": runtime_skill.seed_skill_ids,
+                        "strict_privacy": self.config.strict_privacy,
+                        "latency": latency,
+                    },
+                )
+                self.monitor.link(trace, "runtime_skill_injection", str(injection["id"]), "created")
+                self.monitor.update_trace(trace, status="runtime_skill_injected", runtime_skill_injection_id=str(injection["id"]))
+                self.monitor.end_span(str(injection_span["id"]))
         runtime_context = ""
         if self.config.enable_runtime_observer:
             if active_workflow or skill_decision.domain == "software_engineering":
                 runtime_context = self.runtime.injection_context(prompt, limit=limit, cwd=cwd, session_id=session_id, turn_id=turn_id)
+                workflow_id = str(active_workflow.get("id")) if active_workflow else None
+                self.monitor.event(trace, "workflow_guard_context_injected", subject_type="workflow", subject_id=workflow_id, metadata={"active_workflow": workflow_id, "domain": skill_decision.domain})
+                self.monitor.link(trace, "workflow", workflow_id, "used")
         logger.debug("memory recall completed", prompt_chars=len(prompt), route=result.route, recall_id=recall_id, budget=budget, memory_count=len(result.memories))
         memory_context = "" if runtime_skill_context else result.context
         return "\n\n".join(part for part in (runtime_skill_context, memory_context, runtime_context) if part)
@@ -348,6 +483,8 @@ class MemoryService:
         skill_feedback = self._record_runtime_skill_natural_feedback(prompt, session_id=session_id, turn_id=turn_id)
         if skill_feedback:
             result["runtime_skill_feedback"] = skill_feedback
+            trace = self._trace_for_feedback(skill_feedback, prompt, session_id=session_id, turn_id=turn_id)
+            self._trace_feedback(trace, skill_feedback, source="natural_feedback")
         logger.debug("natural memory feedback checked", session_id=session_id, result=result)
         return result
 
@@ -413,6 +550,123 @@ class MemoryService:
                 **decision.to_evidence(),
             },
         )
+
+    def _trace_tool_observation(self, trace: TraceContext, result: dict[str, Any]) -> None:
+        workflow_id = str(result.get("workflow_id") or "") or None
+        self.monitor.update_trace(trace, status="observing_tools", workflow_id=workflow_id)
+        self.monitor.link(trace, "workflow", workflow_id, "used")
+        observations = []
+        if result.get("observation"):
+            observations.append(result.get("observation"))
+        if result.get("observations"):
+            observations.extend(result.get("observations") or [])
+        if not observations:
+            self.monitor.event(trace, "tool_observed", subject_type="workflow", subject_id=workflow_id, metadata={"observed": bool(result.get("observed"))})
+            return
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            summary = observation.get("summary") or {}
+            matched_step = observation.get("matched_step_id")
+            self.monitor.event(
+                trace,
+                "tool_observed",
+                subject_type="tool_observation",
+                subject_id=str(observation.get("record_id") or ""),
+                metadata={
+                    "tool_name": observation.get("tool_name") or summary.get("tool_name"),
+                    "tool_kind": observation.get("tool_kind") or summary.get("tool_kind"),
+                    "confidence": summary.get("confidence"),
+                    "exit_code": summary.get("exit_code"),
+                    "failed": summary.get("failed"),
+                    "matched_step_id": matched_step,
+                    "soft_evidence": observation.get("soft_evidence"),
+                    "command": observation.get("command") or summary.get("command"),
+                    "files_changed": summary.get("files_changed") or [],
+                },
+            )
+            if matched_step:
+                self.monitor.event(trace, "workflow_step_completed", subject_type="workflow", subject_id=workflow_id, metadata={"matched_step_id": matched_step})
+            if matched_step == "execute_and_verify" and (summary.get("failed") or observation.get("test_failed")):
+                self.monitor.event(trace, "verification_failed", severity="warn", subject_type="workflow", subject_id=workflow_id, metadata={"matched_step_id": matched_step})
+
+    def _trace_stop(self, trace: TraceContext, result: dict[str, Any]) -> None:
+        workflow_id = str(result.get("workflow_id") or "") or None
+        violations = result.get("violations") or []
+        high = [item for item in violations if (item.get("metadata_json") or {}).get("severity") == "high"]
+        completed = bool(workflow_id and self.ledger.latest_state_for("workflow", workflow_id) == "completed")
+        outcome = "failure" if high else "success" if completed else "unknown"
+        self.monitor.event(trace, "stop_observed", subject_type="workflow", subject_id=workflow_id, metadata={"observed": result.get("observed")})
+        self.monitor.event(
+            trace,
+            "workflow_stop_audited",
+            subject_type="workflow",
+            subject_id=workflow_id,
+            metadata={"workflow_id": workflow_id, "observed": result.get("observed"), "completed": completed, "violations": [item.get("id") for item in violations], "high_violation_count": len(high)},
+            severity="error" if high else "info",
+        )
+        for violation in violations:
+            severity = (violation.get("metadata_json") or {}).get("severity") or "info"
+            self.monitor.event(trace, "workflow_violation_detected", severity="error" if severity == "high" else "warn", subject_type="violation", subject_id=str(violation.get("id")), metadata={"violation_type": (violation.get("metadata_json") or {}).get("violation_type"), "severity": severity})
+            self.monitor.link(trace, "violation", str(violation.get("id")), "violated")
+        if outcome == "failure":
+            self.monitor.fail_trace(trace, final_outcome=outcome)
+        else:
+            self.monitor.complete_trace(trace, final_outcome=outcome)
+
+    def _trace_feedback(self, trace: TraceContext, feedback: dict[str, Any], source: str) -> None:
+        metadata = feedback.get("metadata_json") or {}
+        evidence = metadata.get("evidence") or {}
+        self.monitor.event(
+            trace,
+            "feedback_classified",
+            subject_type="runtime_skill_feedback",
+            subject_id=str(feedback.get("id")),
+            metadata={
+                "outcome": metadata.get("outcome"),
+                "feedback_target": evidence.get("feedback_target"),
+                "dimensions": metadata.get("dimensions") or {},
+                "adjust_seed_skill_strength": evidence.get("adjust_seed_skill_strength"),
+                "adjust_durable_skill_strength": evidence.get("adjust_durable_skill_strength"),
+                "source": source,
+            },
+        )
+        self.monitor.event(
+            trace,
+            "runtime_skill_feedback_recorded",
+            subject_type="runtime_skill_feedback",
+            subject_id=str(feedback.get("id")),
+            metadata={
+                "feedback_id": feedback.get("id"),
+                "outcome": metadata.get("outcome"),
+                "feedback_target": evidence.get("feedback_target"),
+                "dimensions": metadata.get("dimensions") or {},
+                "adjust_seed_skill_strength": evidence.get("adjust_seed_skill_strength"),
+                "adjust_durable_skill_strength": evidence.get("adjust_durable_skill_strength"),
+            },
+        )
+        self.monitor.link(trace, "runtime_skill_feedback", str(feedback.get("id")), "created")
+        self.monitor.link(trace, "runtime_skill_injection", metadata.get("injection_id"), "feedback_for")
+
+    def _trace_for_feedback(
+        self,
+        feedback: dict[str, Any],
+        prompt: str,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+    ) -> TraceContext:
+        trace_id = (feedback.get("metadata_json") or {}).get("trace_id")
+        if trace_id:
+            existing = self.monitor.get_trace(str(trace_id))
+            if existing:
+                return TraceContext(
+                    str(trace_id),
+                    str(existing.get("session_id") or "") or session_id,
+                    str(existing.get("turn_id") or "") or turn_id,
+                    str(existing.get("cwd") or "") or None,
+                    str(existing.get("project_key") or "") or None,
+                )
+        return self.monitor.get_or_start_trace(prompt, session_id=session_id, turn_id=turn_id)
 
     def consolidate_memories(self) -> dict[str, Any]:
         result = MemoryConsolidator(self.ledger, self.model, self.reviewer).consolidate()
@@ -502,6 +756,30 @@ class MemoryService:
             "recent_injections": injections[:10],
             "recent_feedback": feedback[:10],
         }
+
+    def list_traces(self, session_id: str | None = None, turn_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        return self.monitor.list_traces(session_id=session_id, turn_id=turn_id, limit=limit)
+
+    def get_trace(self, trace_id: str) -> dict[str, Any] | None:
+        trace = self.monitor.get_trace(trace_id)
+        if not trace:
+            return None
+        return {"trace": trace, "spans": self.ledger.list_trace_spans(trace_id), "links": self.ledger.list_trace_links(trace_id), "summary": self.monitor.trace_summary(trace_id)}
+
+    def trace_events(self, trace_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        return self.monitor.trace_events(trace_id, limit=limit)
+
+    def trace_summary(self, trace_id: str) -> dict[str, Any] | None:
+        return self.monitor.trace_summary(trace_id)
+
+    def trace_audit(self) -> dict[str, Any]:
+        return self.monitor.trace_audit()
+
+    def export_trace(self, trace_id: str) -> dict[str, Any] | None:
+        return self.monitor.export_trace(trace_id)
+
+    def prune_traces(self, older_than_days: int | None = None) -> dict[str, Any]:
+        return self.monitor.prune_traces(older_than_days=older_than_days)
 
     def list_seed_skills(self, limit: int = 50) -> list[dict[str, Any]]:
         return [

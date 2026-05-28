@@ -29,6 +29,7 @@ class Config:
     store_runtime_observation_previews: bool = False
     strict_privacy: bool = False
     enable_feedback_model: bool = True
+    trace_live_log: bool = False
 
 
 def _default_state_dir() -> Path:
@@ -87,6 +88,10 @@ def load_config() -> Config:
         os.environ.get("CODEX_MEMORY_FEEDBACK_MODEL"),
         bool(data.get("enable_feedback_model", True)),
     )
+    trace_live_log = _bool(
+        os.environ.get("CODEX_MEMORY_TRACE_LIVE_LOG"),
+        bool(data.get("trace_live_log", False)),
+    )
 
     return Config(
         model=str(model),
@@ -107,6 +112,7 @@ def load_config() -> Config:
         store_runtime_observation_previews=False if strict_privacy else store_runtime_observation_previews,
         strict_privacy=strict_privacy,
         enable_feedback_model=enable_feedback_model,
+        trace_live_log=trace_live_log,
     )
 
 
